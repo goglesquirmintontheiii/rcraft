@@ -5,8 +5,11 @@
 //! (see `docs/WORLD_FORMAT.md`).
 
 #![forbid(unsafe_code)]
+// Renderer/UI entry points take many plain parameters by design.
+#![allow(clippy::too_many_arguments, clippy::type_complexity, clippy::vec_box)]
 
 pub mod chunk;
+pub mod light;
 pub mod palette;
 pub mod rcw;
 

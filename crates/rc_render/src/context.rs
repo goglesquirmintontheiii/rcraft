@@ -52,8 +52,12 @@ impl GpuContext {
             .copied()
             .find(wgpu::TextureFormat::is_srgb)
             .unwrap_or(caps.formats[0]);
+        let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             format,
             width: width.max(1),
             height: height.max(1),
@@ -117,6 +121,34 @@ impl GpuContext {
         }))
         .context("failed to create GPU device")?;
         Ok((adapter, device, queue))
+    }
+
+    /// Switch between vsync (FIFO) and the lowest-latency mode available.
+    pub fn set_vsync(&mut self, on: bool) {
+        if let Some(s) = &mut self.surface {
+            let caps = s.surface.get_capabilities(&self.adapter);
+            let mode = if on {
+                wgpu::PresentMode::AutoVsync
+            } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+                wgpu::PresentMode::Mailbox
+            } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+                wgpu::PresentMode::Immediate
+            } else {
+                wgpu::PresentMode::AutoNoVsync
+            };
+            if s.config.present_mode != mode {
+                s.config.present_mode = mode;
+                s.surface.configure(&self.device, &s.config);
+            }
+        }
+    }
+
+    /// Colour format frames are rendered in.
+    #[must_use]
+    pub fn color_format(&self) -> wgpu::TextureFormat {
+        self.surface
+            .as_ref()
+            .map_or(crate::OFFSCREEN_FORMAT, |s| s.config.format)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

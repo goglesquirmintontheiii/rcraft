@@ -12,6 +12,9 @@ rc_core.workspace = true
 rc_assets.workspace = true
 rc_render.workspace = true
 glam.workspace = true
+ahash.workspace = true
+serde_json.workspace = true
+font8x8.workspace = true
 
 [lints]
 workspace = true

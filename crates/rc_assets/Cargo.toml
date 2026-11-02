@@ -13,6 +13,13 @@ anyhow.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rc_data.workspace = true
+ahash.workspace = true
+parking_lot.workspace = true
+zip.workspace = true
+tracing.workspace = true
+rayon.workspace = true
+directories.workspace = true
 
 [lints]
 workspace = true

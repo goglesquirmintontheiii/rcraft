@@ -73,6 +73,15 @@ semver = { version = "1", features = ["serde"] }
 directories = "6"
 clap = { version = "4", features = ["derive"] }
 raw-window-handle = "0.6"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+flate2 = "1"
+font8x8 = { version = "0.3", default-features = false }
+ureq = "3"
+sha2 = "0.10"
+self-replace = "1"
+rand = "0.9"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+memory-stats = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

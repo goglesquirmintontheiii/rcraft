@@ -51,6 +51,8 @@ pub struct Chunk {
     /// Highest non-air block per column (`WORLD_SURFACE`), `WORLD_MIN_Y - 1` if none.
     pub height_surface: [i16; 256],
     pub dirty: bool,
+    /// Sky/block light arrays are up to date.
+    pub light_valid: bool,
 }
 
 impl Chunk {
@@ -61,6 +63,7 @@ impl Chunk {
             sections: Box::new(std::array::from_fn(|_| Section::default())),
             height_surface: [(WORLD_MIN_Y - 1) as i16; 256],
             dirty: false,
+            light_valid: false,
         }
     }
 

@@ -1,12 +1,21 @@
 //! RustCraft game binary.
-//!
-//! Phase 0: argument parsing, logging, game-directory resolution, a window
-//! with a cleared wgpu surface, and headless `--screenshot` support.
 
 #![forbid(unsafe_code)]
+// Renderer/UI entry points take many plain parameters by design.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod app;
+mod engine;
+mod game;
+mod gfx;
+mod headless;
+mod items;
+mod options;
 mod paths;
+mod player;
+mod screens;
+mod sysinfo;
+mod world;
 
 use std::path::PathBuf;
 
@@ -25,13 +34,33 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     game_dir: Option<PathBuf>,
 
-    /// Render one frame headlessly to this PNG and exit.
+    /// Use assets from this Minecraft jar or extracted folder.
+    #[arg(long, value_name = "PATH")]
+    assets: Option<PathBuf>,
+
+    /// Render headlessly to this PNG and exit (see --scene).
     #[arg(long, value_name = "PNG")]
     screenshot: Option<PathBuf>,
+
+    /// Headless scene: title, options, video, performance, world, f3, inventory, creative, pause.
+    #[arg(long, default_value = "title")]
+    scene: String,
+
+    /// Seed for headless world scenes.
+    #[arg(long, default_value_t = 0)]
+    seed: i64,
+
+    /// Camera for headless world scenes: x,y,z,yaw,pitch (y may be "surface").
+    #[arg(long)]
+    camera: Option<String>,
 
     /// Window / screenshot size as WIDTHxHEIGHT.
     #[arg(long, default_value = "1280x720", value_parser = parse_size)]
     size: (u32, u32),
+
+    /// Render distance override for headless runs.
+    #[arg(long)]
+    render_distance: Option<i32>,
 
     /// Skip the update check for this launch.
     #[arg(long)]
@@ -53,18 +82,27 @@ fn main() -> Result<()> {
         version = rc_core::version::VERSION,
         target = rc_core::version::TARGET_MINECRAFT_VERSION,
         game_dir = %game_dir.display(),
+        cpus = options::cpu_count(),
         "starting RustCraft"
     );
 
     if let Some(path) = cli.screenshot {
-        let ctx = rc_render::GpuContext::new_headless()?;
-        rc_render::screenshot::capture_png(&ctx, cli.size.0, cli.size.1, &path)?;
-        info!(path = %path.display(), "screenshot written");
-        return Ok(());
+        return headless::run(&headless::Request {
+            path,
+            scene: cli.scene,
+            seed: cli.seed,
+            camera: cli.camera,
+            size: cli.size,
+            game_dir,
+            assets: cli.assets,
+            render_distance: cli.render_distance,
+        });
     }
 
-    app::run(app::Options {
+    app::run(app::LaunchOptions {
         size: cli.size,
         check_updates: !cli.no_update,
+        game_dir,
+        assets: cli.assets,
     })
 }

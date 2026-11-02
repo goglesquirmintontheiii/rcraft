@@ -27,6 +27,79 @@ impl<const N: usize> PalettedContainer<N> {
         }
     }
 
+    /// Build from a full list of values (palette in first-seen order).
+    #[must_use]
+    pub fn from_values(values: &[u32]) -> Self {
+        assert_eq!(values.len(), N);
+        let first = values[0];
+        if values.iter().all(|&v| v == first) {
+            return Self::filled(first);
+        }
+        let mut palette: Vec<u32> = Vec::new();
+        let mut idx = vec![0u32; N];
+        let mut last = (u32::MAX, 0u32);
+        for (i, &v) in values.iter().enumerate() {
+            let k = if v == last.0 {
+                last.1
+            } else {
+                let k = match palette.iter().position(|&p| p == v) {
+                    Some(k) => k as u32,
+                    None => {
+                        palette.push(v);
+                        palette.len() as u32 - 1
+                    }
+                };
+                last = (v, k);
+                k
+            };
+            idx[i] = k;
+        }
+        let bits = Self::bits_for_palette(palette.len());
+        let mut c = Self {
+            palette,
+            bits,
+            data: vec![0; Self::words_for(bits)],
+        };
+        for i in 0..N {
+            if bits >= Self::DIRECT_BITS {
+                c.write_raw(i, values[i]);
+            } else {
+                c.write_raw(i, idx[i]);
+            }
+        }
+        c
+    }
+
+    /// Rebuild from serialized parts; `None` if they are inconsistent.
+    #[must_use]
+    pub fn from_parts(palette: Vec<u32>, bits: u8, data: Vec<u64>) -> Option<Self> {
+        if palette.is_empty() && bits < Self::DIRECT_BITS {
+            return None;
+        }
+        if bits == 0 {
+            return (palette.len() == 1 && data.is_empty()).then_some(Self {
+                palette,
+                bits,
+                data,
+            });
+        }
+        if bits > 32 || data.len() != Self::words_for(bits) {
+            return None;
+        }
+        let c = Self {
+            palette,
+            bits,
+            data,
+        };
+        if bits < Self::DIRECT_BITS {
+            let n = c.palette.len() as u32;
+            if (0..N).any(|i| c.read_raw(i) >= n) {
+                return None;
+            }
+        }
+        Some(c)
+    }
+
     #[inline]
     #[must_use]
     pub fn bits(&self) -> u8 {

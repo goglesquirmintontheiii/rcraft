@@ -5,9 +5,14 @@
 //! atlas, lighting and all world passes.
 
 #![forbid(unsafe_code)]
+// Renderer/UI entry points take many plain parameters by design.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 pub mod context;
+pub mod gui;
+pub mod mesh;
 pub mod screenshot;
+pub mod terrain;
 
 pub use context::{GpuContext, SurfaceTarget};
 
