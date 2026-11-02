@@ -10,6 +10,12 @@ anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+rc_anvil.workspace = true
+rc_worldgen.workspace = true
+rc_data.workspace = true
+rc_core.workspace = true
+rayon.workspace = true
+ahash.workspace = true
 
 [lints]
 workspace = true

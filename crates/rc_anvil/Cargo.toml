@@ -1,6 +1,6 @@
 [package]
 name = "rc_anvil"
-description = "Java Edition (Anvil) world import and export (Phase 2)"
+description = "Java Edition (Anvil) world reading and (Phase 2) writing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,9 @@ repository.workspace = true
 
 [dependencies]
 rc_core.workspace = true
-rc_world.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+flate2 = "1"
 
 [lints]
 workspace = true

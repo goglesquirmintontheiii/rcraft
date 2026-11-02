@@ -1,6 +1,6 @@
 [package]
 name = "rc_data"
-description = "Generated registries (blocks, items, biomes) built from data/*.toml"
+description = "Vanilla data (block states, tags, worldgen parameters) and the block registry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,12 @@ repository.workspace = true
 [dependencies]
 rc_core.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+ahash.workspace = true
+zstd.workspace = true
+
+[build-dependencies]
+zstd.workspace = true
 
 [lints]
 workspace = true

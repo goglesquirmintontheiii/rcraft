@@ -1,6 +1,6 @@
 [package]
 name = "rc_worldgen"
-description = "Terrain generation: noise, density functions, biomes, surface rules, carvers, features"
+description = "Seed-exact vanilla 1.21.1 terrain generation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,17 @@ repository.workspace = true
 
 [dependencies]
 rc_core.workspace = true
+rc_data.workspace = true
 rc_world.workspace = true
 rayon.workspace = true
+serde_json.workspace = true
+ahash.workspace = true
+anyhow.workspace = true
+md-5 = "0.10"
+sha2 = "0.10"
+
+[dev-dependencies]
+rc_anvil.workspace = true
 
 [lints]
 workspace = true

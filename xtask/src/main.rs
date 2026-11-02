@@ -8,6 +8,8 @@ use std::process::Command;
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 
+mod parity;
+
 #[derive(Parser)]
 #[command(about = "RustCraft developer tasks")]
 struct Cli {
@@ -24,6 +26,18 @@ enum Cmd {
         #[arg(long, default_value = "1280x720")]
         size: String,
     },
+    /// Diff generated chunks against a vanilla world (seed-exact parity).
+    Parity {
+        world: PathBuf,
+        /// overworld | nether | end
+        #[arg(long, default_value = "overworld")]
+        dim: String,
+        /// biomes | carvers | full
+        #[arg(long, default_value = "carvers")]
+        stage: String,
+        #[arg(long, default_value_t = 64)]
+        limit: usize,
+    },
     /// Write `latest.json` + `SHA256SUMS` for a set of release assets.
     Manifest {
         /// Release version, e.g. 0.1.0
@@ -37,6 +51,19 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Screenshot { out, size } => screenshot(&out, &size),
         Cmd::Manifest { version, dir } => manifest(&version, &dir),
+        Cmd::Parity {
+            world,
+            dim,
+            stage,
+            limit,
+        } => {
+            let dim = match dim.as_str() {
+                "nether" => rc_worldgen::Dimension::Nether,
+                "end" => rc_worldgen::Dimension::End,
+                _ => rc_worldgen::Dimension::Overworld,
+            };
+            parity::run(&world, dim, &stage, limit)
+        }
     }
 }
 

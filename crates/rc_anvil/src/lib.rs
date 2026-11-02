@@ -4,18 +4,15 @@
 //! the reference source for seed-exact worldgen parity tests (ADR-012); the
 //! writer and the user-facing import/export UI land in Phase 2.
 //!
-//! See `docs/ARCHITECTURE.md` and `docs/ROADMAP.md` for where this crate
-//! fits and which phase fills it in.
+//! Format sources: minecraft.wiki "NBT format", "Region file format",
+//! "Chunk format" (see docs/CLEAN_ROOM.md).
 
 #![forbid(unsafe_code)]
 
-/// Crate marker used by smoke tests until real functionality lands.
-pub const CRATE_NAME: &str = "rc_anvil";
+pub mod chunk;
+pub mod nbt;
+pub mod region;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn links() {
-        assert_eq!(super::CRATE_NAME, "rc_anvil");
-    }
-}
+pub use chunk::{AnvilChunk, AnvilSection};
+pub use nbt::Tag;
+pub use region::RegionFile;

@@ -95,6 +95,16 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Optimised but quick to build; used for parity runs and local profiling.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+panic = "unwind"
+strip = false
+debug = "line-tables-only"
+
 [profile.bench]
 inherits = "release"
 debug = true
