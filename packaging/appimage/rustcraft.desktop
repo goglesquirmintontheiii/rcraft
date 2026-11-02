@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=RustCraft
+Exec=rustcraft
+Icon=rustcraft
+Categories=Game;
+Terminal=false

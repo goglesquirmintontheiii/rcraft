@@ -1,0 +1,19 @@
+[package]
+name = "rc_core"
+description = "Core types shared by every RustCraft crate: ids, coordinates, registries, config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+glam.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+semver.workspace = true
+ahash.workspace = true
+
+[lints]
+workspace = true

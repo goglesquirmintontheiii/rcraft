@@ -1,0 +1,15 @@
+[package]
+name = "rc_net"
+description = "Java Edition protocol client (Phase 4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

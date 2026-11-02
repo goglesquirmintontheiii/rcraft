@@ -1,0 +1,16 @@
+[package]
+name = "rc_worldgen"
+description = "Terrain generation: noise, density functions, biomes, surface rules, carvers, features"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+rc_world.workspace = true
+rayon.workspace = true
+
+[lints]
+workspace = true

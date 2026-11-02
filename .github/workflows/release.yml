@@ -1,0 +1,100 @@
+name: Release
+
+# Push a tag like v0.1.0 to build and publish a GitHub Release with:
+#   rustcraft-<ver>-windows-x86_64.exe   (portable; every release)
+#   rustcraft-<ver>-linux-x86_64.AppImage (from 0.2.0 on; set BUILD_APPIMAGE)
+#   SHA256SUMS, SHA256SUMS.minisig, latest.json (self-updater manifest)
+#
+# Secrets: MINISIGN_SECRET_KEY (contents of the minisign secret key file),
+#          MINISIGN_PASSWORD (its password; may be empty).
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  BUILD_APPIMAGE: ${{ !startsWith(github.ref_name, 'v0.1.') }}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows portable .exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release -p rustcraft --target x86_64-pc-windows-msvc
+      - name: Stage
+        shell: bash
+        run: |
+          VER=${GITHUB_REF_NAME#v}
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/rustcraft.exe "dist/rustcraft-$VER-windows-x86_64.exe"
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: dist/ }
+
+  linux:
+    name: Linux AppImage
+    if: ${{ !startsWith(github.ref_name, 'v0.1.') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev libfuse2
+      - run: cargo build --release -p rustcraft
+      - name: Build AppImage
+        run: |
+          VER=${GITHUB_REF_NAME#v}
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          mkdir -p AppDir/usr/bin
+          cp target/release/rustcraft AppDir/usr/bin/
+          cp packaging/appimage/rustcraft.desktop AppDir/
+          cp packaging/appimage/rustcraft.png AppDir/
+          cp packaging/appimage/AppRun AppDir/ && chmod +x AppDir/AppRun
+          mkdir -p dist
+          ./appimagetool-x86_64.AppImage AppDir "dist/rustcraft-$VER-linux-x86_64.AppImage"
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: dist/ }
+
+  publish:
+    name: Publish release
+    needs: [windows, linux]
+    if: ${{ always() && needs.windows.result == 'success' && (needs.linux.result == 'success' || needs.linux.result == 'skipped') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - name: Manifest + checksums
+        run: |
+          VER=${GITHUB_REF_NAME#v}
+          cargo run -q -p xtask -- manifest "$VER" artifacts
+          cat artifacts/SHA256SUMS
+      - name: Sign checksums (minisign)
+        if: ${{ env.MINISIGN_SECRET_KEY != '' }}
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          sudo apt-get install -y minisign
+          printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s minisign.key -m artifacts/SHA256SUMS -x artifacts/SHA256SUMS.minisig
+          rm minisign.key
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: RustCraft ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*

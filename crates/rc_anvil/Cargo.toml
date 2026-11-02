@@ -1,0 +1,16 @@
+[package]
+name = "rc_anvil"
+description = "Java Edition (Anvil) world import and export (Phase 2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+rc_world.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

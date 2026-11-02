@@ -1,0 +1,22 @@
+[package]
+name = "rc_world"
+description = "Chunks, light engine, ticking and the RCW save format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+rc_data.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+zstd.workspace = true
+memmap2.workspace = true
+xxhash-rust.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

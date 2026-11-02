@@ -1,0 +1,20 @@
+[package]
+name = "rc_update"
+description = "Self-updater: GitHub Releases manifest, download, verify, replace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "rc_entity"
+description = "Entity framework, player, mobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+rc_world.workspace = true
+rc_physics.workspace = true
+glam.workspace = true
+
+[lints]
+workspace = true

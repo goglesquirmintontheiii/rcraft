@@ -1,0 +1,15 @@
+[package]
+name = "rc_data"
+description = "Generated registries (blocks, items, biomes) built from data/*.toml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

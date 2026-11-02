@@ -1,0 +1,16 @@
+[package]
+name = "rc_shaders"
+description = "Iris-compatible shader pack pipeline (Phase 4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+rc_render.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

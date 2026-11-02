@@ -1,0 +1,100 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rustcraft",
+    "crates/rc_core",
+    "crates/rc_data",
+    "crates/rc_assets",
+    "crates/rc_world",
+    "crates/rc_worldgen",
+    "crates/rc_physics",
+    "crates/rc_entity",
+    "crates/rc_render",
+    "crates/rc_ui",
+    "crates/rc_audio",
+    "crates/rc_update",
+    "crates/rc_anvil",
+    "crates/rc_net",
+    "crates/rc_shaders",
+    "crates/rc_lod",
+    "crates/rc_mod",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/goglesquirmintontheiii/rcraft"
+authors = ["RustCraft contributors"]
+
+[workspace.dependencies]
+# internal
+rc_core = { path = "crates/rc_core" }
+rc_data = { path = "crates/rc_data" }
+rc_assets = { path = "crates/rc_assets" }
+rc_world = { path = "crates/rc_world" }
+rc_worldgen = { path = "crates/rc_worldgen" }
+rc_physics = { path = "crates/rc_physics" }
+rc_entity = { path = "crates/rc_entity" }
+rc_render = { path = "crates/rc_render" }
+rc_ui = { path = "crates/rc_ui" }
+rc_audio = { path = "crates/rc_audio" }
+rc_update = { path = "crates/rc_update" }
+rc_anvil = { path = "crates/rc_anvil" }
+rc_net = { path = "crates/rc_net" }
+rc_shaders = { path = "crates/rc_shaders" }
+rc_lod = { path = "crates/rc_lod" }
+rc_mod = { path = "crates/rc_mod" }
+
+# external
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+ahash = "0.8"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+rayon = "1"
+wgpu = "30"
+winit = "0.30"
+pollster = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+zstd = "0.14"
+memmap2 = "0.9"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+semver = { version = "1", features = ["serde"] }
+directories = "6"
+clap = { version = "4", features = ["derive"] }
+raw-window-handle = "0.6"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_debug_implementations = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+inherits = "release"
+debug = true

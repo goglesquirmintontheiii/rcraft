@@ -1,0 +1,17 @@
+[package]
+name = "rc_ui"
+description = "Vanilla-style GUI framework, screens, HUD and font rendering"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rc_core.workspace = true
+rc_assets.workspace = true
+rc_render.workspace = true
+glam.workspace = true
+
+[lints]
+workspace = true
