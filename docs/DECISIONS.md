@@ -92,3 +92,15 @@ threads, so two vanilla runs of the same seed can differ there. RustCraft
 decorates in a deterministic order (by distance from the requesting player,
 ties by chunk coordinates). Parity tests therefore assert exactness for
 biomes and terrain and treat feature overlaps statistically.
+
+## ADR-017 Repository screenshots use the fallback pack
+Decided 2026-11-02 (Phase 1). Screenshots committed under `docs/screenshots/`
+are rendered with the procedural CC0 fallback pack, never with Mojang
+textures, so the repository contains no Mojang art in any form. Screenshots
+with the owner's vanilla assets may be shared with the owner directly but are
+not committed.
+
+## ADR-018 Phase 1 drops go straight to the inventory
+Item entities need the entity system planned for Phase 2. Until then a block
+broken in survival adds its drop directly to the inventory; blocks that need a
+tool drop nothing, as with a bare hand in vanilla.

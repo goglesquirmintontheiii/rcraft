@@ -1029,3 +1029,68 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod debug_dump {
+    #[test]
+    #[ignore = "manual diagnostic"]
+    fn dump_surface() {
+        let dir = std::path::PathBuf::from(std::env::var("RC_WORLD").unwrap());
+        let st = rc_world::rcw::DimStorage::new(dir.join("dim/overworld")).unwrap();
+        let b = rc_data::blocks();
+        let map = rc_world::rcw::IdMap::identity(b.len(), 64);
+        let mut counts = std::collections::BTreeMap::new();
+        for cx in -2..2 {
+            for cz in -2..2 {
+                let c = st
+                    .load(rc_core::ChunkPos::new(cx, cz), &map)
+                    .unwrap()
+                    .unwrap();
+                for i in 0..256 {
+                    let h = i32::from(c.height_surface[i]);
+                    let p = rc_core::BlockPos::new(
+                        cx * 16 + (i as i32 & 15),
+                        h,
+                        cz * 16 + (i as i32 >> 4),
+                    );
+                    let s = c.get_block(p);
+                    *counts.entry(b.def(s).name.clone()).or_insert(0) += 1;
+                    let below = c.get_block(rc_core::BlockPos::new(p.x, h - 1, p.z));
+                    *counts
+                        .entry(format!("below:{}", b.def(below).name))
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+        eprintln!("{counts:#?}");
+        // Mesh the river section at the origin and report water vertex colours.
+        let a = rc_assets::Assets::discover(
+            std::env::var_os("RC_ASSETS")
+                .as_deref()
+                .map(std::path::Path::new),
+        );
+        let models = std::sync::Arc::new(a.block_models(4));
+        let tables = rc_render::mesh::MeshTables::new(&models, true);
+        let colors = super::biome_colors(None, None);
+        let n: [Option<std::sync::Arc<rc_world::Chunk>>; 9] = std::array::from_fn(|i| {
+            st.load(
+                rc_core::ChunkPos::new(i as i32 / 3 - 1, i as i32 % 3 - 1),
+                &map,
+            )
+            .unwrap()
+            .map(std::sync::Arc::new)
+        });
+        let snap = rc_render::mesh::Snapshot::capture(&n, 7);
+        let m = rc_render::mesh::mesh_section(&snap, &tables, &models, &colors, true);
+        eprintln!(
+            "translucent verts {}, first colours {:?}",
+            m.translucent.len(),
+            m.translucent
+                .iter()
+                .take(4)
+                .map(|v| v.color)
+                .collect::<Vec<_>>()
+        );
+        eprintln!("water colours sample {:?}", &colors.water[..4]);
+    }
+}

@@ -298,8 +298,9 @@ impl Player {
             self.sprinting = false;
         }
 
-        let mut fwd = f64::from(input.forward);
-        let mut strafe = f64::from(input.strafe);
+        // Vanilla damps raw input by 0.98 before applying it.
+        let mut fwd = f64::from(input.forward) * 0.98;
+        let mut strafe = f64::from(input.strafe) * 0.98;
         if self.sneaking {
             fwd *= SNEAK_MULT;
             strafe *= SNEAK_MULT;
@@ -365,7 +366,7 @@ impl Player {
             };
             let f = slip * AIR_FRICTION;
             let accel = if self.on_ground {
-                WALK_SPEED * sprint * (0.216_000_02 / (f * f * f))
+                WALK_SPEED * sprint * (0.216_000_02 / (slip * slip * slip))
             } else {
                 AIR_ACCEL * sprint
             };
@@ -606,5 +607,115 @@ impl Player {
             cell[k] += step[k];
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rc_core::ChunkPos;
+
+    use super::*;
+    use crate::world::{MeshShared, World, biome_colors};
+
+    fn flat_world() -> World {
+        let dir = std::env::temp_dir().join(format!(
+            "rc-phys-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let models = Arc::new(rc_assets::fallback::block_models(rc_data::blocks(), 1));
+        let mesh = Arc::new(MeshShared {
+            tables: rc_render::mesh::MeshTables::new(&models, true),
+            models,
+            colors: biome_colors(None, None),
+            smooth: true,
+        });
+        let mut w = World::open(&dir, "t", 1, 1, mesh).unwrap();
+        let stone = rc_data::blocks().default_state("stone");
+        for cx in -2..=2 {
+            for cz in -2..=2 {
+                let mut c = rc_world::Chunk::new_empty(ChunkPos::new(cx, cz));
+                for x in 0..16 {
+                    for z in 0..16 {
+                        for y in 60..64 {
+                            c.set_block(BlockPos::new(cx * 16 + x, y, cz * 16 + z), stone);
+                        }
+                    }
+                }
+                // A one-block wall to step against at z = 5.
+                for x in 0..16 {
+                    if cz == 0 {
+                        c.set_block(BlockPos::new(cx * 16 + x, 64, 5), stone);
+                    }
+                }
+                w.chunks.insert(c.pos, Arc::new(c));
+            }
+        }
+        w
+    }
+
+    #[test]
+    fn falls_lands_walks_and_jumps() {
+        let w = flat_world();
+        let mut p = Player {
+            pos: [0.5, 70.0, 0.5],
+            ..Player::default()
+        };
+        let idle = MoveInput::default();
+        for _ in 0..60 {
+            p.tick(&idle, &w);
+        }
+        assert!(p.on_ground, "{:?}", p.pos);
+        assert!((p.pos[1] - 64.0).abs() < 1e-6, "{:?}", p.pos);
+        // Fall of 6 blocks: 3 damage.
+        assert!((p.health - 17.0).abs() < 1e-6, "health {}", p.health);
+        // Walk forward (+Z at yaw 0) into the wall at z = 5.
+        let fwd = MoveInput {
+            forward: 1.0,
+            ..MoveInput::default()
+        };
+        for _ in 0..40 {
+            p.tick(&fwd, &w);
+        }
+        assert!(p.pos[2] > 4.0 && p.pos[2] < 4.71, "{:?}", p.pos);
+        // Walking speed ~4.3 m/s: from z 0.5 the wall stops us within 1 s.
+        // Jump over it.
+        let jump = MoveInput {
+            forward: 1.0,
+            jump: true,
+            ..MoveInput::default()
+        };
+        for _ in 0..30 {
+            p.tick(&jump, &w);
+        }
+        assert!(p.pos[2] > 6.0, "{:?}", p.pos);
+        assert!(p.pos[1] >= 64.0);
+    }
+
+    #[test]
+    fn walking_speed_matches_vanilla() {
+        let w = flat_world();
+        let mut p = Player {
+            pos: [0.5, 64.0, -20.5],
+            on_ground: true,
+            ..Player::default()
+        };
+        let fwd = MoveInput {
+            forward: 1.0,
+            ..MoveInput::default()
+        };
+        for _ in 0..20 {
+            p.tick(&fwd, &w);
+        }
+        let z0 = p.pos[2];
+        for _ in 0..20 {
+            p.tick(&fwd, &w);
+        }
+        let speed = p.pos[2] - z0;
+        // Vanilla walking speed is ~4.317 blocks/s.
+        assert!((speed - 4.317).abs() < 0.05, "speed {speed}");
     }
 }

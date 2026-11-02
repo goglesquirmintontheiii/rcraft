@@ -961,13 +961,26 @@ pub fn hud(ui: &mut Ui<'_>, cx: &mut Ctx<'_>) {
     match t.hotbar {
         Some(s) => ui.sprite(&s, hx, hy, 182.0, 22.0, WHITE),
         None => {
-            ui.fill(hx, hy, 182.0, 22.0, [0.0, 0.0, 0.0, 0.5]);
+            ui.fill(hx, hy, 182.0, 22.0, [0.0, 0.0, 0.0, 0.55]);
+            for i in 0..9 {
+                let x = hx + 1.0 + i as f32 * 20.0;
+                ui.fill(x, hy + 1.0, 20.0, 1.0, [0.6, 0.6, 0.6, 0.8]);
+                ui.fill(x, hy + 20.0, 20.0, 1.0, [0.6, 0.6, 0.6, 0.8]);
+                ui.fill(x, hy + 1.0, 1.0, 20.0, [0.6, 0.6, 0.6, 0.8]);
+            }
+            ui.fill(hx + 181.0, hy + 1.0, 1.0, 20.0, [0.6, 0.6, 0.6, 0.8]);
         }
     }
     let sel = g.inv.selected as f32;
     match t.hotbar_selection {
         Some(s) => ui.sprite(&s, hx - 1.0 + sel * 20.0, hy - 1.0, 24.0, 23.0, WHITE),
-        None => ui.fill(hx - 1.0 + sel * 20.0, hy - 1.0, 24.0, 2.0, WHITE),
+        None => {
+            let x = hx - 1.0 + sel * 20.0;
+            ui.fill(x, hy - 1.0, 24.0, 2.0, WHITE);
+            ui.fill(x, hy + 21.0, 24.0, 2.0, WHITE);
+            ui.fill(x, hy - 1.0, 2.0, 24.0, WHITE);
+            ui.fill(x + 22.0, hy - 1.0, 2.0, 24.0, WHITE);
+        }
     }
     for i in 0..9 {
         if let Some(s) = g.inv.slots[i] {

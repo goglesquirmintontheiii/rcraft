@@ -64,7 +64,7 @@ fn style(name: &str) -> ([u8; 3], Style) {
     } else if has("grass") || has("fern") {
         (0x9a9a9a, Style::Cross)
     } else if has("water") {
-        (0x3f76e4, Style::Noise)
+        (0xc8d2e0, Style::Noise)
     } else if has("lava") {
         (0xd96415, Style::Noise)
     } else if has("log") || has("wood") || has("stem") && !has("mushroom") {
@@ -390,7 +390,7 @@ pub fn block_models(blocks: &Blocks, mip_levels: u32) -> BlockModels {
             let key = (bi as u16, info.shape);
             let m = *shape_models.entry(key).or_insert_with(|| {
                 let boxes = &blocks.shapes[info.shape as usize];
-                let quads = if boxes.is_empty() || is_plant(name) {
+                let quads = if boxes.is_empty() {
                     cross(sprite, ti)
                 } else {
                     boxes

@@ -154,18 +154,29 @@ impl Game {
                     if !self.world.is_loaded(BlockPos::new(x, 0, z)) {
                         return false;
                     }
-                    let Some(y) = self.world.surface_y(x, z) else {
+                    let Some(top) = self.world.surface_y(x, z) else {
                         return false;
                     };
-                    let top = self.world.get_block(BlockPos::new(x, y, z));
-                    if b.fluid(top).is_empty() && !b.collision(top).is_empty() && y > 0 {
-                        self.player.pos =
-                            [f64::from(x) + 0.5, f64::from(y) + 1.0, f64::from(z) + 0.5];
-                        self.player.prev_pos = self.player.pos;
-                        self.spawn = BlockPos::new(x, y + 1, z);
-                        self.world.meta.spawn = [x, y + 1, z];
-                        self.spawned = true;
-                        return true;
+                    // Walk down through canopies to ground vanilla would spawn on.
+                    let valid = rc_data::tags().block("valid_spawn");
+                    let free = |w: &World, y: i32| {
+                        let s = w.get_block(BlockPos::new(x, y, z));
+                        b.collision(s).is_empty() && b.fluid(s).is_empty()
+                    };
+                    for y in (top - 24..=top).rev() {
+                        let s = self.world.get_block(BlockPos::new(x, y, z));
+                        if valid.contains_state(b, s)
+                            && free(&self.world, y + 1)
+                            && free(&self.world, y + 2)
+                        {
+                            self.player.pos =
+                                [f64::from(x) + 0.5, f64::from(y) + 1.0, f64::from(z) + 0.5];
+                            self.player.prev_pos = self.player.pos;
+                            self.spawn = BlockPos::new(x, y + 1, z);
+                            self.world.meta.spawn = [x, y + 1, z];
+                            self.spawned = true;
+                            return true;
+                        }
                     }
                 }
             }

@@ -1,5 +1,7 @@
 //! RustCraft game binary.
 
+// No console window for release builds on Windows; logs go to logs/latest.log.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 // Renderer/UI entry points take many plain parameters by design.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -78,6 +80,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let game_dir = paths::resolve_game_dir(cli.game_dir.as_deref())?;
     paths::init_logging(&game_dir)?;
+    paths::install_crash_reporter(&game_dir);
     info!(
         version = rc_core::version::VERSION,
         target = rc_core::version::TARGET_MINECRAFT_VERSION,

@@ -1,4 +1,4 @@
-# RCW — RustCraft World Format (draft v1)
+# RCW — RustCraft World Format (v1)
 
 Design goals, in priority order:
 
@@ -57,24 +57,24 @@ record_header
   flags      u8          bit0: light valid, bit1: has entities, bit2: has block entities
   raw_len    u32         uncompressed payload length
   payload    zstd-compressed bytes (dictionary id in flags)
-payload (uncompressed)
-  section_mask     u32   which of the 24 sections are non-empty (bit per section)
-  per non-empty section:
-    block_palette  { len: u16, ids: [u32] }     if len == 1 ⇒ whole section uniform
-    block_bits     u8  (0, 4, 5, 6, 7, 8, or 16=direct)
-    block_data     packed u64 words, 4096 entries, vanilla-style no-straddle packing
-    biome_palette  { len: u8, ids: [u32] }
-    biome_bits     u8
-    biome_data     packed, 64 entries
-    sky_light      2048 bytes or absent (flag)
-    block_light    2048 bytes or absent (flag)
-  heightmaps       4 × 256 × 9-bit packed  (WORLD_SURFACE, MOTION_BLOCKING,
-                                            MOTION_BLOCKING_NO_LEAVES, OCEAN_FLOOR)
-  block_entities   count + [ pos: u16, type: u32, data: RCB ]
-  entities         count + [ type: u32, uuid: u128, data: RCB ]
-  scheduled_ticks  block & fluid tick lists
-  post_processing  list of positions needing update on load
+payload (uncompressed, little-endian) — as implemented in v1
+  section_count    u32   always 24 for the overworld layout
+  per section (bottom to top):
+    blocks         palette_len u16, palette [u32 stable id], bits u8,
+                   packed u64 words (4096 entries, no straddling; bits 0 ⇒ uniform)
+    biomes         palette_len u8,  palette [u32 stable id], bits u8, packed words (64)
+    sky_light      tag u8: 0 absent (implicit 15) | 1 uniform + u8 value | 2 + 2048 bytes
+    block_light    same encoding (absent ⇒ 0)
+  heights          256 × i16 WORLD_SURFACE (other heightmaps are rebuilt on load)
+  block_entities   u32 count (0 in v0.1)
+  entities         u32 count (0 in v0.1)
+  scheduled_ticks  u32 count (0 in v0.1)
+  post_processing  u32 count (0 in v0.1)
 ```
+
+Record header in v1 is 30 bytes: magic, xxh3-64 of bytes 12.., cx, cz,
+data_version, status (4 = features, 6 = full), flags (bit 0: light valid),
+raw payload length, then the zstd frame (level 3, no dictionary yet).
 
 **RCB** (RustCraft Binary) is a tiny self-describing binary encoding (typed tags,
 length-prefixed, little-endian) used only for the irregular parts (block entity

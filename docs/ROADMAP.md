@@ -71,92 +71,103 @@ reviewed the decisions below. **Met 2026-11-02.**
 
 ---
 
-## Phase 1 — Core engine `[ ]`
+## Phase 1 — Core engine `[x]` (released as v0.1.0)
 
 **Goal:** a playable single world you can walk around, break and place naturally
 generated blocks in, with a UI that looks and behaves like vanilla.
 
+Legend: `[x]` done · `[~]` partly done (what is missing moved to Phase 2, see
+"Carried over" below).
+
 ### 1.1 Engine foundation
-- [ ] Main loop: fixed 20 TPS simulation tick, uncapped/vsync render, interpolation
-- [ ] Input mapping with vanilla defaults and rebinding (options screen)
-- [ ] Settings persistence (`options.toml`, mirrors vanilla `options.txt` keys)
-- [ ] Logging, crash reports (`crash-reports/` like vanilla), panic hook with dialog
-- [ ] Asset system: bundled fallback pack + vanilla-asset import (see Decision 1)
-- [ ] Audio engine (kira): positional sounds, music, volume categories
+- [x] Main loop: fixed 20 TPS simulation tick, vsync or capped render, interpolation
+- [~] Input mapping with vanilla defaults (rebinding screen → Phase 2)
+- [x] Settings persistence (`options.json`)
+- [x] Logging (`logs/latest.log`), crash reports (`crash-reports/`) via panic hook
+- [x] Asset system: procedural CC0 fallback pack + the player's own vanilla jar
+      read in place (auto-detected `.minecraft`, or `--assets` / `RUSTCRAFT_ASSETS`)
+- [ ] Audio engine → Phase 2
 
 ### 1.2 Rendering (wgpu)
-- [ ] Chunk meshing: greedy-ish per-face culling, per-section (16³) meshes,
-      opaque / cutout / translucent passes, sorted translucency
-- [ ] Texture atlas builder with mipmaps, animated textures (`.mcmeta` parity)
-- [ ] Block models: full vanilla JSON block-model + blockstate format support
-      (multipart, variants, rotations, UV lock, ambient occlusion)
-- [ ] Lighting: vanilla 0–15 sky + block light, smooth lighting, AO
-- [ ] Sky, sun/moon, clouds, fog, underwater/lava overlay, render distance 2–32
-- [ ] Frustum + occlusion culling, multi-threaded meshing with rayon
-- [ ] Held item / block rendering, block breaking overlay, selection box
-- [ ] F2 screenshots → `screenshots/` (PNG), `--screenshot` CLI for CI
-- [ ] Performance target: 60 fps @ 16 chunks on an integrated GPU; 144+ on mid-range;
-      Potato preset playable on Core 2 Duo-class hardware in ≤ 1 GB RAM
-- [ ] Options → Performance screen: memory limit, worker threads / CPU limit,
-      FPS cap & GPU target, presets (Potato / Low / Medium / High / Ultra / Auto)
+- [x] Chunk meshing with face culling, per-section (16³) meshes,
+      solid / cutout / translucent passes, back-to-front section sorting
+- [x] Texture atlas builder with mipmaps, animated textures (`.mcmeta`)
+- [x] Block models: vanilla JSON block-model + blockstate format
+      (multipart, variants, weighted random rotation, x/y rotations, UV lock,
+      element rotation, ambient-occlusion flag)
+- [x] Lighting: vanilla 0–15 sky + block light, smooth lighting, AO, lightmap
+- [x] Sky, sun/moon, clouds, fog, underwater tint/fog, render distance 2–32
+- [~] Frustum culling, multi-threaded meshing on the worker pool (GPU culling → Phase 4)
+- [~] Block breaking overlay, selection box (held item rendering → Phase 2)
+- [x] F2 screenshots → `screenshots/` (PNG), `--screenshot --scene …` CLI for CI/docs
+- [~] Performance target — measured on software rendering only; owner hardware
+      benchmarks pending (see `docs/perf/`)
+- [x] Options → Performance screen: memory limit, CPU threads, GPU usage limit
+      (frame cap), presets Potato / Low / Medium / High / Ultra
 
 ### 1.3 World
-- [ ] Chunk columns −64..320, 24 sections, palette-compressed block storage
-- [ ] Block state registry generated at build time from `data/blocks/*.toml`
-- [ ] Block ticking (random + scheduled), fluid flow (water, lava), gravity blocks
-- [ ] Light engine (sky light propagation, block light, incremental updates)
-- [ ] **RCW world format** (`docs/WORLD_FORMAT.md`): zstd-compressed, palette +
-      bit-packed sections, 32×32 region files with index, xxh3 checksums, mmap reads,
-      async save thread. Benchmarked against Anvil in `benches/`.
-- [ ] One built-in world ("World") created on first launch; seed configurable only
-      through the config file in this phase
+- [x] Chunk columns −64..320, 24 sections, palette-compressed block storage
+- [x] Block state registry from the vanilla data-generator report (ADR-015)
+- [ ] Block ticking, fluid flow → Phase 2 (gravity blocks fall when disturbed)
+- [x] Light engine: exact sky/block light per 3×3 neighbourhood, parallel,
+      relight on edit
+- [x] **RCW world format**: zstd, palette + bit-packed sections, 32×32 append-only
+      region files, xxh3 checksums, world header with stable id tables, IO thread,
+      compaction (Anvil benchmark → Phase 2 with Anvil import)
+- [x] One world; name, seed and game mode chosen on the create screen
 
-### 1.4 Terrain generation (vanilla 1.21.1 structure)
-- [ ] Noise primitives: improved Perlin, octave/“normal” noise, simplex (biome/End)
-- [ ] Density-function graph (all vanilla function types), noise router, cave noise
-      (cheese / spaghetti / noodle), aquifers, ore veins (copper/iron)
-- [ ] Multi-noise biome source with the vanilla overworld parameter list
-- [ ] Surface rules (all vanilla overworld biomes)
-- [ ] Carvers (cave, canyon)
-- [ ] Features needed for "naturally generated blocks": trees (all overworld
-      types), ores, grass/flowers, lakes, springs, disks, kelp/seagrass, ice,
-      dripstone, moss/lush caves, amethyst geodes
-- [ ] Nether & End generation (structure of the pipeline; biomes + terrain only)
-- [ ] Exact RNG: Java LCG `Random`, Xoroshiro128++, positional random factories
-      (MD5 seed hashing), `LegacyRandom` paths
-- [ ] Seed-exact parity harness: reference captures from the owner's vanilla
-      install (Anvil chunks via `rc_anvil` reader, pulled forward to Phase 1),
-      per-stage diff tests in CI, parity dashboard in `docs/perf/parity.md`
+### 1.4 Terrain generation (vanilla 1.21.1, seed-exact)
+- [x] Noise primitives: improved Perlin, octave/normal noise, simplex, blended noise
+- [x] Density-function graph, noise router, cheese/spaghetti/noodle caves,
+      aquifers, copper/iron ore veins
+- [x] Multi-noise biome source with the vanilla parameter list (100 % match)
+- [x] Surface rules
+- [x] Carvers (cave, canyon, nether cave)
+- [~] Features: trees (all overworld types), ores, vegetation, lakes, springs,
+      disks, kelp/seagrass/corals, ice, dripstone, lush caves, geodes, monster
+      rooms… (Nether/End features, sculk, fossils, icebergs → Phase 2)
+- [x] Nether & End terrain and biomes
+- [x] Exact RNG: Java LCG, Xoroshiro128++, positional factories, legacy paths
+- [x] Parity harness: 32 reference chunks from six of the owner's worlds in
+      `tests/parity/`, checked in CI (biomes + terrain exact; decorated blocks
+      99.7–99.9 %, the rest is neighbour decoration order — ADR-016)
 
 ### 1.5 Player
-- [ ] Vanilla movement physics: walking, sprinting, sneaking, jumping, swimming,
-      ladders, falling damage, step height, collision with vanilla block shapes
-- [ ] Survival & creative modes (no hunger drain yet; health + damage present)
-- [ ] Block breaking with correct hardness/tool speed; block placing with vanilla
-      placement rules for natural blocks (logs axis, slabs, stairs, snow layers…)
-- [ ] Inventory (36 + armour + offhand), hotbar, creative inventory tabs & search,
-      item drops as entities, pickup
+- [~] Vanilla movement physics: walking (4.317 b/s), sprinting, sneaking with edge
+      clamp, jumping, swimming, flying, step height, fall/void/lava/drowning
+      damage, collision with vanilla shapes (ladders → Phase 2)
+- [x] Survival, creative and spectator modes
+- [~] Block breaking with vanilla hardness timing (bare hand; tools arrive with
+      items in Phase 2); placement rules for axis/facing/slab/half/waterlogged
+- [~] Inventory (36 slots), hotbar, creative "Natural Blocks" tab with search
+      (item entities, armour/offhand → Phase 2; drops go straight to the inventory)
 
 ### 1.6 UI — vanilla parity
-- [ ] UI framework: 9-slice sprites, vanilla GUI scale rules, vanilla bitmap font
-      (ascii + unifont fallback), text shadows, formatting codes
-- [ ] Title screen (panorama, splash text, buttons), Options (all sub-screens:
-      video, controls incl. key binds, music & sounds, chat, accessibility, language),
-      Pause menu, Loading screen, Death screen
-- [ ] HUD: hotbar, hearts, armour, air bubbles, crosshair, experience bar, chat,
-      scoreboard sidebar placeholder, F3 debug overlay (vanilla layout), F1 hide
-- [ ] Inventory & creative screens, tooltip rendering with vanilla styling
-- [ ] Chat with command input; core client commands (`/tp`, `/gamemode`, `/time`,
-      `/give` for natural blocks, `/seed`, `/kill`)
+- [x] UI framework: nine-slice sprites, vanilla GUI scale rule, vanilla bitmap
+      fonts (or public-domain fallback), shadows, formatting codes
+- [~] Title (panorama, splash, buttons), Options (video, performance, controls,
+      updates; sound/chat/accessibility/language → Phase 2), Pause, Loading,
+      Death, world select / create
+- [x] HUD: hotbar, hearts, hunger, air, crosshair, XP bar, chat, F3, F1
+- [x] Inventory & creative screens, vanilla-style tooltips
+- [x] Chat with commands: `/tp`, `/gamemode`, `/time set`, `/give`, `/seed`,
+      `/kill`, `/clear`, `/spawnpoint`, `/help`
 
 ### 1.7 Self-update
-- [ ] On launch: fetch `latest.json` from GitHub Releases, compare semver,
-      download platform asset, verify SHA-256 + minisign signature, replace self,
-      relaunch. Setting: *Automatic / Ask / Off*.
+- [~] On launch: fetch `latest.json`, compare semver, download the platform asset,
+      verify size + SHA-256, replace the executable (applies on restart).
+      Automatic / Ask / Off setting. (minisign verification once a signing key
+      secret is configured)
 
 ### 1.8 Release 0.1.0
-- [ ] Portable `rustcraft-0.1.0-windows-x86_64.exe` via GitHub Actions
-- [ ] Screenshots in `docs/screenshots/phase1/`
+- [x] Portable `rustcraft-0.1.0-windows-x86_64.exe` via GitHub Actions
+- [x] Screenshots in `docs/screenshots/phase1/`
+
+### Carried over to Phase 2
+Audio; key rebinding; block ticking & fluid flow; item entities and drops;
+held-item / hand rendering; ladders; Nether/End features, sculk, fossils,
+icebergs; sound/chat/accessibility/language options; Anvil benchmark;
+minisign verification.
 
 ---
 

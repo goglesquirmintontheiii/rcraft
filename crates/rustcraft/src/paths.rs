@@ -66,3 +66,30 @@ pub fn init_logging(game_dir: &Path) -> Result<()> {
         .init();
     Ok(())
 }
+
+/// Write `crash-reports/crash-<time>.txt` on panic (like vanilla), then
+/// continue with the default hook so the message still reaches stderr.
+pub fn install_crash_reporter(game_dir: &Path) {
+    let dir = game_dir.join("crash-reports");
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let bt = std::backtrace::Backtrace::force_capture();
+        let report = format!(
+            "---- RustCraft Crash Report ----\n\nVersion: {}\nTarget: Minecraft {} compatible\nOS: {} {}\nThread: {}\n\n{info}\n\nBacktrace:\n{bt}\n",
+            rc_core::version::VERSION,
+            rc_core::version::TARGET_MINECRAFT_VERSION,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::thread::current().name().unwrap_or("?"),
+        );
+        let path = dir.join(format!("crash-{secs}.txt"));
+        if std::fs::write(&path, &report).is_ok() {
+            eprintln!("crash report saved to {}", path.display());
+        }
+        tracing::error!("{info}");
+        default(info);
+    }));
+}

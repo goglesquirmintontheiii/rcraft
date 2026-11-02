@@ -439,7 +439,11 @@ impl Ui<'_> {
         };
         self.frame(handle, hx, y, 8.0, h, [0.6, 0.6, 0.6, 1.0]);
         let c = if hover { YELLOW } else { WHITE };
-        self.text_centered(label, x + w / 2.0, y + (h - 8.0) / 2.0, c);
+        let mut text = label.to_owned();
+        while self.font.width(&text) > w - 6.0 && text.chars().count() > 1 {
+            text.pop();
+        }
+        self.text_centered(&text, x + w / 2.0, y + (h - 8.0) / 2.0, c);
         changed
     }
 

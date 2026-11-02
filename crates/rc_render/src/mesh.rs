@@ -490,7 +490,7 @@ fn mesh_fluid(ctx: &Ctx<'_>, x: usize, y: usize, z: usize, kind: u8, out: &mut S
         [1.0; 3]
     };
     let (alpha, target) = if water {
-        (200u8, &mut out.translucent)
+        (255u8, &mut out.translucent)
     } else {
         (255u8, &mut out.solid)
     };

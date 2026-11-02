@@ -636,6 +636,13 @@ impl Engine {
 
     /// Keyboard shortcuts that work in game (not in text fields).
     pub fn game_key(&mut self, key: GameKey) {
+        // The key that opens a screen must not also act inside it.
+        if matches!(key, GameKey::Escape | GameKey::Inventory | GameKey::Chat(_))
+            && self.screens.is_empty()
+        {
+            self.input.keys.clear();
+            self.input.typed.clear();
+        }
         let in_game = self.game.is_some();
         let top = self.screens.last().cloned();
         match key {
