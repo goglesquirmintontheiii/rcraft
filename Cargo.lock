@@ -1925,6 +1925,7 @@ version = "0.0.1"
 dependencies = [
  "ahash",
  "anyhow",
+ "flate2",
  "md-5",
  "rayon",
  "rc_anvil",
@@ -3258,6 +3259,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "clap",
+ "flate2",
  "rayon",
  "rc_anvil",
  "rc_core",

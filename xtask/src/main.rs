@@ -37,7 +37,15 @@ enum Cmd {
         stage: String,
         #[arg(long, default_value_t = 64)]
         limit: usize,
+        /// For --stage full: block size in chunks.
+        #[arg(long, default_value_t = 3)]
+        n: i32,
+        /// For --stage full: chunk x,z to search near.
+        #[arg(long, value_parser = parse_pair)]
+        near: Option<(i32, i32)>,
     },
+    /// Copy reference chunks from a vanilla world into tests/parity/<name>.
+    ParityExtract { world: PathBuf, name: String },
     /// Write `latest.json` + `SHA256SUMS` for a set of release assets.
     Manifest {
         /// Release version, e.g. 0.1.0
@@ -51,20 +59,37 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Screenshot { out, size } => screenshot(&out, &size),
         Cmd::Manifest { version, dir } => manifest(&version, &dir),
+        Cmd::ParityExtract { world, name } => {
+            parity::extract(&world, &name, &root().join("tests/parity"))
+        }
         Cmd::Parity {
             world,
             dim,
             stage,
             limit,
+            n,
+            near,
         } => {
             let dim = match dim.as_str() {
                 "nether" => rc_worldgen::Dimension::Nether,
                 "end" => rc_worldgen::Dimension::End,
                 _ => rc_worldgen::Dimension::Overworld,
             };
-            parity::run(&world, dim, &stage, limit)
+            if stage == "full" {
+                parity::run_full(&world, dim, n, near)
+            } else {
+                parity::run(&world, dim, &stage, limit)
+            }
         }
     }
+}
+
+fn parse_pair(s: &str) -> Result<(i32, i32), String> {
+    let (a, b) = s.split_once(',').ok_or("expected X,Z")?;
+    Ok((
+        a.trim().parse().map_err(|_| "bad x")?,
+        b.trim().parse().map_err(|_| "bad z")?,
+    ))
 }
 
 fn root() -> PathBuf {

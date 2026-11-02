@@ -13,6 +13,10 @@ no Mojang assets.
 - Open-source projects under permissive licences, for *technique* reference only
   (e.g. wgpu examples, noise algorithms from academic papers)
 
+- Mojang's data-generator output (block-state reports, worldgen JSON) and
+  community-extracted block property tables — data, not code (ADR-015)
+- Reference chunks saved by the owner's own copy of the game (`tests/parity/`)
+
 ## Not allowed
 - Decompiled Minecraft code (MCP, Yarn/Mojmap-mapped sources, Fabric/Forge
   internals that embed vanilla code)
@@ -28,3 +32,7 @@ When a non-obvious behaviour is implemented, add a line here or a doc comment:
 | worldgen | density function types | minecraft.wiki "Density function" |
 | world | paletted container bit widths | minecraft.wiki "Chunk format" |
 | net | protocol 767 packets | minecraft.wiki "Java Edition protocol" |
+| worldgen | RNG (LCG, Xoroshiro128++, positional factories) | JDK docs, xoshiro paper, minecraft.wiki "Random number generator" |
+| worldgen | density-function semantics, cell interpolation order | minecraft.wiki "Density function", "Noise router"; verified against saved chunks |
+| worldgen | multi-noise R-tree selection | minecraft.wiki "Biome/Multi-noise"; verified 100% vs reference worlds |
+| worldgen | feature placement modifiers & feature configs | minecraft.wiki "Placed feature", "Configured feature" |

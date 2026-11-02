@@ -15,7 +15,8 @@
     clippy::int_plus_one,
     clippy::needless_range_loop,
     clippy::neg_cmp_op_on_partial_ord,
-    clippy::needless_lifetimes
+    clippy::needless_lifetimes,
+    clippy::type_complexity
 )]
 
 pub mod aquifer;
@@ -23,9 +24,11 @@ pub mod biome;
 pub mod carver;
 pub mod climate;
 pub mod density;
+pub mod feature;
 pub mod generator;
 pub mod mth;
 pub mod noise;
+pub mod pipeline;
 pub mod proto;
 pub mod providers;
 pub mod rng;

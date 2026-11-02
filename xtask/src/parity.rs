@@ -74,6 +74,213 @@ pub fn collect(
     Ok(out)
 }
 
+/// All saved chunk statuses in the world, by position.
+fn status_map(world: &Path, dim: Dimension) -> Result<ahash::AHashMap<ChunkPos, String>> {
+    let mut m = ahash::AHashMap::new();
+    for c in collect(
+        world,
+        dim,
+        &[
+            "minecraft:full",
+            "minecraft:initialize_light",
+            "minecraft:light",
+            "minecraft:spawn",
+            "minecraft:features",
+            "minecraft:carvers",
+            "minecraft:surface",
+            "minecraft:noise",
+            "minecraft:biomes",
+        ],
+        usize::MAX,
+    )? {
+        m.insert(ChunkPos::new(c.x, c.z), c.status.clone());
+    }
+    Ok(m)
+}
+
+fn decorated(s: &str) -> bool {
+    matches!(
+        s,
+        "minecraft:full"
+            | "minecraft:initialize_light"
+            | "minecraft:light"
+            | "minecraft:spawn"
+            | "minecraft:features"
+    )
+}
+
+/// Full-pipeline parity on an `n`×`n` block of chunks around the reference
+/// chunk closest to `(cx, cz)`.
+pub fn run_full(world: &Path, dim: Dimension, n: i32, around: Option<(i32, i32)>) -> Result<()> {
+    let seed = seed_of(world)?;
+    let dg = DimensionGen::new(dim, seed);
+    let statuses = status_map(world, dim)?;
+    // Choose a block of fully decorated chunks whose 1-ring is also decorated.
+    let mut cands: Vec<ChunkPos> = statuses
+        .iter()
+        .filter(|(p, s)| {
+            decorated(s)
+                && (-1..=n).all(|dx| {
+                    (-1..=n).all(|dz| {
+                        statuses
+                            .get(&ChunkPos::new(p.x + dx, p.z + dz))
+                            .is_some_and(|s| decorated(s))
+                    })
+                })
+        })
+        .map(|(p, _)| *p)
+        .collect();
+    cands.sort_by_key(|p| {
+        let (ax, az) = around.unwrap_or((0, 0));
+        (
+            i64::from(p.x - ax).pow(2) + i64::from(p.z - az).pow(2),
+            p.x,
+            p.z,
+        )
+    });
+    let Some(&origin) = cands.first() else {
+        anyhow::bail!("no fully decorated {n}x{n} block found")
+    };
+    println!(
+        "world {} seed {seed} dim {dim:?}: full parity on {n}x{n} block at chunk {},{}",
+        world.display(),
+        origin.x,
+        origin.z
+    );
+    let mut order = Vec::new();
+    for dz in -1..=n {
+        for dx in -1..=n {
+            let p = ChunkPos::new(origin.x + dx, origin.z + dz);
+            if statuses.get(&p).is_some_and(|s| decorated(s)) {
+                order.push(p);
+            }
+        }
+    }
+    match std::env::var("PARITY_ORDER").as_deref() {
+        Ok("reverse") => order.reverse(),
+        Ok(o) if o.starts_with("from:") => {
+            let v: Vec<i32> = o[5..].split(',').map(|x| x.parse().unwrap()).collect();
+            order.sort_by_key(|p| {
+                (
+                    i64::from(p.x - v[0]).pow(2) + i64::from(p.z - v[1]).pow(2),
+                    p.x,
+                    p.z,
+                )
+            });
+        }
+        Ok("spiral") => {
+            let (cx, cz) = (origin.x + n / 2, origin.z + n / 2);
+            order.sort_by_key(|p| {
+                (
+                    i64::from(p.x - cx).pow(2) + i64::from(p.z - cz).pow(2),
+                    p.x,
+                    p.z,
+                )
+            });
+        }
+        _ => {}
+    }
+    if let Ok(t) = std::env::var("PARITY_TRACE") {
+        let v: Vec<i32> = t.split(',').map(|x| x.trim().parse().unwrap()).collect();
+        rc_worldgen::feature::region::TRACE
+            .with(|tr| tr.borrow_mut().0 = Some(rc_core::BlockPos::new(v[0], v[1], v[2])));
+    }
+    let t0 = std::time::Instant::now();
+    let mut store = rc_worldgen::pipeline::ChunkStore::new(&dg);
+    store.generate(&order);
+    println!(
+        "generated {} chunks, decorated {} in {:?}",
+        store.chunks.len(),
+        order.len(),
+        t0.elapsed()
+    );
+    let blocks = rc_data::blocks();
+    let mut report = Report::default();
+    let dir = region_dir(world, dim);
+    if let Ok(d) = std::env::var("PARITY_DUMP") {
+        // x0,x1,y0,y1,z  → grid of (vanilla / ours) short names
+        let v: Vec<i32> = d.split(',').map(|x| x.trim().parse().unwrap()).collect();
+        let short = |s: BlockStateId| {
+            let n = blocks.to_string(s).replace("minecraft:", "");
+            let dist = blocks
+                .get(s, "distance")
+                .map(|d| d.to_string())
+                .unwrap_or_default();
+            let base: String = n.split('[').next().unwrap().chars().take(6).collect();
+            format!("{base}{dist}")
+        };
+        for y in (v[2]..=v[3]).rev() {
+            let mut a = String::new();
+            let mut b = String::new();
+            for x in v[0]..=v[1] {
+                let p = ChunkPos::new(x >> 4, v[4] >> 4);
+                let rf = RegionFile::open(&dir.join(format!("r.{}.{}.mca", p.x >> 5, p.z >> 5)))?;
+                let ac = AnvilChunk::from_nbt(&rf.read_chunk(p.x, p.z)?.unwrap())?;
+                let e = ac.block((x & 15) as usize, y, (v[4] & 15) as usize).map_or(
+                    BlockStateId::AIR,
+                    |s| {
+                        blocks
+                            .parse_state(&s.to_state_string())
+                            .unwrap_or(BlockStateId::AIR)
+                    },
+                );
+                let g = store
+                    .chunks
+                    .get(&p)
+                    .map_or(BlockStateId::AIR, |c| c.get(x, y, v[4]));
+                a.push_str(&format!("{:>8}", short(e)));
+                b.push_str(&format!("{:>8}", short(g)));
+            }
+            println!("{y:>4} V {a}");
+            println!("{y:>4} R {b}");
+        }
+    }
+    for dz in 0..n {
+        for dx in 0..n {
+            let p = ChunkPos::new(origin.x + dx, origin.z + dz);
+            let (rx, rz) = (p.x >> 5, p.z >> 5);
+            let rf = RegionFile::open(&dir.join(format!("r.{rx}.{rz}.mca")))?;
+            let Some(t) = rf.read_chunk(p.x, p.z)? else {
+                continue;
+            };
+            let ac = AnvilChunk::from_nbt(&t)?;
+            let pc = &store.chunks[&p];
+            report.chunks += 1;
+            for y in dg.settings.min_y..(dg.settings.min_y + dg.settings.height) {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let exp = ac.block(x, y, z).map_or(BlockStateId::AIR, |s| {
+                            blocks
+                                .parse_state(&s.to_state_string())
+                                .unwrap_or(BlockStateId::AIR)
+                        });
+                        let got = pc.get((p.x << 4) + x as i32, y, (p.z << 4) + z as i32);
+                        report.blocks += 1;
+                        if exp != got {
+                            report.block_mismatch += 1;
+                            let e = blocks.to_string(exp);
+                            let g = blocks.to_string(got);
+                            let want = std::env::var("PARITY_PAIR").ok();
+                            if want.as_deref().is_none_or(|w| w == format!("{e}|{g}"))
+                                && report.examples.len() < 12
+                            {
+                                report.examples.push(format!(
+                                    "{},{y},{}: expected {e} got {g}",
+                                    (p.x << 4) + x as i32,
+                                    (p.z << 4) + z as i32
+                                ));
+                            }
+                            *report.pairs.entry((e, g)).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    print_report(report, "full");
+    Ok(())
+}
+
 pub fn run(world: &Path, dim: Dimension, stage: &str, limit: usize) -> Result<()> {
     let seed = seed_of(world)?;
     println!(
@@ -180,6 +387,11 @@ pub fn run(world: &Path, dim: Dimension, stage: &str, limit: usize) -> Result<()
     });
     let r = report.into_inner().unwrap();
     println!("checked {} chunks in {:?}", r.chunks, t1.elapsed());
+    print_report(r, stage);
+    Ok(())
+}
+
+fn print_report(r: Report, stage: &str) {
     if stage == "biomes" {
         println!(
             "biomes: {}/{} match ({:.4}%)",
@@ -206,6 +418,59 @@ pub fn run(world: &Path, dim: Dimension, stage: &str, limit: usize) -> Result<()
     }
     for e in &r.examples {
         println!("  e.g. {e}");
+    }
+}
+
+/// Copy a few reference chunks (raw NBT) into `tests/parity/` for CI.
+pub fn extract(world: &Path, name: &str, out: &Path) -> Result<()> {
+    use std::io::Write;
+    let seed = seed_of(world)?;
+    let dir = out.join(name);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("seed.txt"), seed.to_string())?;
+    for (dim, sub, tag) in [
+        (Dimension::Overworld, "region", "overworld"),
+        (Dimension::Nether, "DIM-1/region", "nether"),
+        (Dimension::End, "DIM1/region", "end"),
+    ] {
+        let rd = world.join(sub);
+        if !rd.is_dir() || std::fs::read_dir(&rd)?.next().is_none() {
+            continue;
+        }
+        let _ = dim;
+        let mut picked = 0;
+        let mut files: Vec<_> = std::fs::read_dir(&rd)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        files.sort();
+        for f in files {
+            if std::fs::metadata(&f)?.len() < 8192 || picked >= 3 {
+                continue;
+            }
+            let r = RegionFile::open(&f)?;
+            for (lx, lz) in r.present() {
+                if picked >= 3 {
+                    break;
+                }
+                let Some(raw) = r.read_raw(lx, lz)? else {
+                    continue;
+                };
+                let t = nbt::parse(&raw)?;
+                let c = AnvilChunk::from_nbt(&t)?;
+                if c.status != "minecraft:carvers" {
+                    continue;
+                }
+                let mut enc =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+                enc.write_all(&raw)?;
+                std::fs::write(
+                    dir.join(format!("{tag}_{}_{}.nbt.zlib", c.x, c.z)),
+                    enc.finish()?,
+                )?;
+                picked += 1;
+            }
+        }
     }
     Ok(())
 }

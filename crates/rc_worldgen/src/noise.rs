@@ -343,7 +343,8 @@ impl NormalNoise {
                 hi = hi.max(i as i32);
             }
         }
-        let expected_deviation = 0.1 * (1.0 + 1.0 / f64::from(hi - lo + 1));
+        // Java int arithmetic: wraps for the all-zero legacy offset noise.
+        let expected_deviation = 0.1 * (1.0 + 1.0 / f64::from(hi.wrapping_sub(lo).wrapping_add(1)));
         let value_factor = 0.166_666_666_666_666_66 / expected_deviation;
         let max_value = (first.max_value() + second.max_value()) * value_factor;
         Self {

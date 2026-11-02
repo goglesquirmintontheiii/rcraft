@@ -99,7 +99,12 @@ impl Node {
 pub struct RTree {
     nodes: Vec<Node>,
     root: usize,
+    /// Unique id, so per-thread warm-start state is per tree (vanilla keeps
+    /// a `ThreadLocal` per `RTree` instance).
+    pub id: u64,
 }
+
+static NEXT_TREE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn parameter_space(nodes: &[Node], children: &[usize]) -> Space {
     let mut s = nodes[children[0]].space;
@@ -128,7 +133,11 @@ impl RTree {
             .collect();
         let ids: Vec<usize> = (0..nodes.len()).collect();
         let root = Self::build_rec(&mut nodes, ids);
-        Self { nodes, root }
+        Self {
+            nodes,
+            root,
+            id: NEXT_TREE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     fn key(nodes: &[Node], n: usize, dim: usize, abs: bool) -> i64 {
@@ -260,9 +269,11 @@ impl RTree {
 
     /// Search, warm-started from (and updating) `last`.
     #[must_use]
-    pub fn search(&self, t: &Target, last: &Cell<Option<usize>>) -> u32 {
-        let leaf = self.search_rec(self.root, &t.0, last.get());
-        last.set(Some(leaf));
+    pub fn search(&self, t: &Target, last: &Cell<(u64, Option<usize>)>) -> u32 {
+        let (id, prev) = last.get();
+        let prev = if id == self.id { prev } else { None };
+        let leaf = self.search_rec(self.root, &t.0, prev);
+        last.set((self.id, Some(leaf)));
         match self.nodes[leaf].kind {
             NodeKind::Leaf(v) => v,
             NodeKind::Sub(_) => unreachable!(),

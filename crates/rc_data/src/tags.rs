@@ -39,6 +39,7 @@ impl BlockSet {
 
 pub struct Tags {
     block: AHashMap<String, BlockSet>,
+    block_order: AHashMap<String, Vec<u16>>,
     biome: AHashMap<String, AHashSet<String>>,
     nblocks: usize,
 }
@@ -95,17 +96,23 @@ fn resolve_names(
 impl Tags {
     pub(crate) fn load(files: &VanillaFiles, blocks: &Blocks) -> Self {
         let mut block = AHashMap::new();
+        let mut block_order = AHashMap::new();
         for name in files.list("tags/block") {
             let key = format!("minecraft:{name}");
             let mut names = Vec::new();
             resolve_names(files, "tags/block", &key, &mut AHashSet::new(), &mut names);
             let mut set = BlockSet::with_len(blocks.defs.len());
+            let mut order = Vec::new();
             for n in names {
                 if let Some(i) = blocks.index_of(&n) {
+                    if !set.contains(i) {
+                        order.push(i);
+                    }
                     set.insert(i);
                 }
             }
-            block.insert(key, set);
+            block.insert(key.clone(), set);
+            block_order.insert(key, order);
         }
         let mut biome = AHashMap::new();
         for name in files.list("tags/worldgen/biome") {
@@ -122,6 +129,7 @@ impl Tags {
         }
         Self {
             block,
+            block_order,
             biome,
             nblocks: blocks.defs.len(),
         }
@@ -135,6 +143,16 @@ impl Tags {
             .get(&norm(tag))
             .cloned()
             .unwrap_or_else(|| BlockSet::with_len(self.nblocks))
+    }
+
+    /// Tag contents in definition order (nested tags expanded in place,
+    /// first occurrence kept), as `HolderSet` iteration gives them.
+    #[must_use]
+    pub fn block_list(&self, tag: &str) -> Vec<u16> {
+        self.block_order
+            .get(&norm(tag))
+            .cloned()
+            .unwrap_or_default()
     }
 
     #[must_use]

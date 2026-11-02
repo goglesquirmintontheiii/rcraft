@@ -83,7 +83,7 @@ pub enum BiomeSource {
 }
 
 thread_local! {
-    static LAST_LEAF: Cell<Option<usize>> = const { Cell::new(None) };
+    static LAST_LEAF: Cell<(u64, Option<usize>)> = const { Cell::new((0, None)) };
 }
 
 /// All seed-dependent generator state for one dimension.
@@ -102,6 +102,8 @@ pub struct DimensionGen {
     /// `BiomeManager.obfuscateSeed(seed)`.
     pub biome_zoom_seed: i64,
     pub(crate) states: WgStates,
+    pub(crate) feature_order:
+        std::sync::OnceLock<(crate::feature::StepOrder, crate::feature::BiomeFeatures)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -234,6 +236,7 @@ impl DimensionGen {
             biomes,
             biome_zoom_seed: obfuscate_seed(seed),
             states,
+            feature_order: std::sync::OnceLock::new(),
         }
     }
 

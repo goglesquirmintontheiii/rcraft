@@ -20,6 +20,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 rc_anvil.workspace = true
+flate2 = "1"
 
 [lints]
 workspace = true
