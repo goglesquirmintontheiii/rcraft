@@ -17,6 +17,11 @@
 - No Windows toolchain locally: releases are produced by `.github/workflows/release.yml`
   on tag push `vX.Y.Z` (bump `workspace.package.version` first). Phase 1 ships
   `.exe` only; Phase 2+ also `.AppImage`.
+- Worldgen is **seed-exact** with vanilla 1.21.1 (ADR-012): RNG/noise must be
+  bit-exact; every stage is diff-tested against reference captures in
+  `tests/parity/` taken from the owner's own game. Ask the owner for new
+  captures rather than approximating.
+- Multiplayer never requires a Microsoft account for offline-mode servers (ADR-013).
 - Performance rules: no per-frame allocation in render/tick paths; all heavy work
   on rayon pools sized from the in-game CPU limit; memory caches evict against the
   in-game memory limit; GPU does GPU work (culling, particles, LOD gen).

@@ -1,4 +1,7 @@
-//! Java Edition protocol client (Phase 4)
+//! Java Edition protocol client (Phase 4).
+//!
+//! Offline-mode servers must work with no Microsoft account (ADR-013);
+//! Microsoft/Mojang authentication is an optional layer on top.
 //!
 //! See `docs/ARCHITECTURE.md` and `docs/ROADMAP.md` for where this crate
 //! fits and which phase fills it in.

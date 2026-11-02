@@ -15,7 +15,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ---
 
-## Phase 0 — Roadmap & skeleton `[~]`
+## Phase 0 — Roadmap & skeleton `[x]`
 
 **Goal:** agree on the plan, lock the architecture, and have a repo that builds,
 tests, lints, and ships through CI from day one.
@@ -34,26 +34,40 @@ Deliverables
 - [x] `CLAUDE.md` with project conventions so every future session follows them
 
 Exit criteria: `cargo test --workspace` green, CI green on `main`, owner has
-reviewed the DECISION items below.
+reviewed the decisions below. **Met 2026-11-02.**
 
-### Decisions needed before Phase 1
-1. **Assets (most important).** Textures, sounds, fonts, and language files are
-   Mojang's copyright and cannot ship in a clean-room build. Proposed: RustCraft
-   ships an **original, CC0 fallback pack** ("Bedrock-free placeholder art") and
-   offers a one-click **"Import vanilla assets"** that reads the user's own legally
-   installed `.minecraft` (client jar + `assets/` index) and uses those textures,
-   sounds and fonts at runtime. Full visual parity therefore requires the user to own
-   the game, which is also what Phase 4's official-server multiplayer requires anyway.
-2. **Licence.** Proposed: MIT OR Apache-2.0 for code; CC0 for bundled original assets.
-3. **Minimum platform.** Proposed: Windows 10+ x86_64 and Linux x86_64 (glibc 2.35+).
-   Vulkan 1.1 / DX12 class GPU required (wgpu). macOS is "should work" but untested
-   and not released.
-4. **Worldgen parity target.** Seed-identical terrain to vanilla 1.21.1 is the goal,
-   but it depends on reproducing every noise constant from public docs. Phase 1
-   commits to *structurally identical* generation (multi-noise biomes, density
-   functions, aquifers, ore veins, surface rules, carvers); seed-exact parity is
-   tracked as an explicit stretch item with a test suite comparing against
-   wiki-documented reference seeds.
+### Decisions (confirmed by the owner, 2026-11-02)
+1. **Assets.** Textures, sounds, fonts, and language files are Mojang's copyright
+   and cannot ship in a clean-room build. RustCraft ships an **original, CC0
+   fallback pack** and offers a one-click **"Import vanilla assets"** that reads the
+   user's own legally installed `.minecraft` (client jar + `assets/` index) and
+   uses those textures, sounds and fonts at runtime. Full visual parity requires
+   owning Java Edition (the owner does). The importer also understands a Bedrock
+   install's resource pack as a secondary source for textures.
+2. **Licence.** MIT OR Apache-2.0 for code; CC0 for bundled original assets.
+3. **Minimum platform.** Windows 10+ x86_64 and Linux x86_64 (glibc 2.35+).
+   Vulkan 1.1 / DX12 class GPU (wgpu); GL fallback for very old hardware. macOS is
+   "should work" but untested and not released.
+4. **Worldgen parity target: seed-exact.** A given seed must produce the same
+   terrain, biomes, caves, ores and feature placement as vanilla 1.21.1. This is
+   a hard Phase 1 requirement, not a stretch goal. Consequences:
+   - Every noise/RNG primitive is implemented to the bit: Java `Random` (LCG),
+     Xoroshiro128++ with the vanilla seed-mixing (MD5 of the seed for the
+     positional-random factory), `LegacyRandom` where 1.21 still uses it, the
+     exact octave/amplitude tables of every named noise, Perlin permutation
+     construction, the density-function evaluation order, cell interpolation
+     (4×8×4 cells in the overworld), aquifer and ore-vein sampling, surface-rule
+     evaluation, carver RNG consumption order and feature/decorator RNG order.
+   - A **parity test harness** is part of 1.4: reference data is captured from
+     the real game that the owner owns (block samples, biome grids, heightmaps
+     at known seeds via vanilla `/locate`, F3 and exported Anvil chunks read by
+     `rc_anvil`'s reader, which is pulled forward from Phase 2 to Phase 1 for
+     this purpose). CI diff-tests every generation stage against that data.
+   - Parity is proven stage by stage (biome source → base terrain → surface →
+     carvers → features) so regressions are localised. Phase 1 exit criterion:
+     byte-identical block output for the reference seeds over the surveyed
+     regions in all three dimensions' terrain, and identical feature placement
+     for every feature type in scope.
 
 ---
 
@@ -108,7 +122,11 @@ generated blocks in, with a UI that looks and behaves like vanilla.
       types), ores, grass/flowers, lakes, springs, disks, kelp/seagrass, ice,
       dripstone, moss/lush caves, amethyst geodes
 - [ ] Nether & End generation (structure of the pipeline; biomes + terrain only)
-- [ ] Reference-seed regression tests
+- [ ] Exact RNG: Java LCG `Random`, Xoroshiro128++, positional random factories
+      (MD5 seed hashing), `LegacyRandom` paths
+- [ ] Seed-exact parity harness: reference captures from the owner's vanilla
+      install (Anvil chunks via `rc_anvil` reader, pulled forward to Phase 1),
+      per-stage diff tests in CI, parity dashboard in `docs/perf/parity.md`
 
 ### 1.5 Player
 - [ ] Vanilla movement physics: walking, sprinting, sneaking, jumping, swimming,
@@ -208,11 +226,15 @@ generated blocks in, with a UI that looks and behaves like vanilla.
 
 - [ ] **Java Edition protocol 767 (1.21.1)** client: handshake, status, login
       (encryption, compression), configuration, play. Full packet coverage.
-- [ ] Microsoft account login (device-code OAuth → XBL → XSTS → Minecraft services),
-      profile/skin/cape fetch, chat signing (session keys, 1.19.1+ secure chat)
-      **DECISION:** this needs an Azure AD application client-ID registered by the
-      project owner (free, but requires a Microsoft account and Mojang's approval
-      for the Minecraft API scope).
+- [ ] **Offline-mode servers first**: full protocol support for servers with
+      `online-mode=false` (username login, no encryption/session auth, no chat
+      signing) — this must work with no Microsoft credentials at all.
+- [ ] Microsoft account login for `online-mode=true` servers (device-code OAuth
+      → XBL → XSTS → Minecraft services), profile/skin/cape fetch, chat signing
+      (session keys, 1.19.1+ secure chat). Needs an Azure AD application
+      client-ID registered by the owner (agreed; set up when Phase 4 starts).
+      Until it exists, the Multiplayer screen shows an "Offline (no account)"
+      profile and online servers show a clear "requires sign-in" status.
 - [ ] Multiplayer screen, server list, LAN discovery, server resource packs,
       server-side prediction reconciliation
 - [ ] **Iris-compatible shader packs**: parse `shaders.properties`, GLSL
@@ -247,8 +269,7 @@ generated blocks in, with a UI that looks and behaves like vanilla.
 >    surface and effectively requires re-exposing Mojang's class layout, which
 >    conflicts with clean-room goals. Proposed as a research spike only.
 >
-> **DECISION:** confirm the target before Phase 5. The plan below assumes 1 + 2
-> fully, 3 as a spike.
+> Confirmed by the owner: 1 + 2 fully, 3 as a research spike.
 
 - [ ] `rc_mod` WASM ABI (wasmtime), capability-based permissions, hot reload,
       mod menu, dependency resolution, versioning
@@ -331,9 +352,10 @@ Ryzen 9850X3D, 96 GB DDR5, RTX 3060 (`.AppImage`).
   maps), plus **DLSS** (Super Resolution, and Frame Generation where the GPU
   supports it) via the NVIDIA Streamline / NGX SDK on Windows and the Linux
   Vulkan NGX library on Linux where NVIDIA ships it; FSR 3 as the vendor-neutral
-  counterpart for AMD/Intel/iGPUs. **DECISION:** the DLSS SDK has a licence
-  agreement and redistribution rules — the owner must accept it; the DLL is
-  bundled only in release builds, never in the repo.
+  counterpart for AMD/Intel/iGPUs. The DLSS SDK has a licence agreement and
+  redistribution rules — the owner accepts it when Phase 4 starts; the DLL is
+  bundled only in release builds, never in the repo. DLSS is always optional:
+  the game is complete without it.
 
 ## Mods that ship as first-party RustCraft mods
 

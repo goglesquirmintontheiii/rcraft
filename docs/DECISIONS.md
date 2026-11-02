@@ -54,3 +54,21 @@ is used for generation, meshing, lighting init and I/O, not for the tick itself.
 ## ADR-011 Java-mod support strategy (provisional)
 Native WASM mods first; data-driven Java mods second; JVM bridge only as a
 research spike. To be confirmed by the owner before Phase 5 (see ROADMAP).
+
+## ADR-012 Seed-exact worldgen parity is a hard requirement
+Decided 2026-11-02. All RNG and noise primitives are bit-exact reimplementations
+from public documentation, and every generation stage is diff-tested against
+reference captures taken from the owner's legally owned vanilla install. The
+Anvil *reader* (`rc_anvil`) therefore ships in Phase 1 as test infrastructure;
+the writer stays in Phase 2. Clean-room rule unchanged: reference data is
+observed game *output*, never game code.
+
+## ADR-013 Multiplayer must not depend on Microsoft credentials
+Decided 2026-11-02. Offline-mode (`online-mode=false`) servers are supported with
+no account at all; Microsoft login is an additive layer for online-mode servers
+and is gated on the owner registering an Azure application when Phase 4 begins.
+
+## ADR-014 Licence
+Decided 2026-11-02. Code: MIT OR Apache-2.0. Original bundled assets: CC0-1.0.
+Third-party assets are never bundled; vanilla assets are imported from the
+user's own installation at runtime (ADR-005).
