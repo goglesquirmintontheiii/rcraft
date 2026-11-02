@@ -7,17 +7,55 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod app;
+mod blockentity;
+mod blocklogic;
+mod commands;
+mod containers;
 mod engine;
+mod entity;
+mod fallback_tex;
 mod game;
 mod gfx;
 mod headless;
 mod items;
+mod java;
+mod loot;
+mod mobs;
+mod models;
 mod options;
+mod particles;
 mod paths;
 mod player;
+mod recipes;
+mod scene;
 mod screens;
 mod sysinfo;
 mod world;
+mod worlds;
+
+thread_local! {
+    /// Block particle sprites (atlas UVs per block state), set when models load.
+    pub static PARTICLE_SPRITES: std::cell::RefCell<Vec<[f32; 4]>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+static AUDIO_EVENTS: std::sync::RwLock<Option<std::sync::Arc<rc_audio::Audio>>> =
+    std::sync::RwLock::new(None);
+
+/// Whether the loaded sound set defines `event`.
+pub fn audio_has(event: &str) -> bool {
+    AUDIO_EVENTS
+        .read()
+        .ok()
+        .and_then(|a| a.as_ref().map(|a| a.has_event(event)))
+        .unwrap_or(false)
+}
+
+/// Register the active audio system for `audio_has`.
+pub fn set_audio(a: std::sync::Arc<rc_audio::Audio>) {
+    if let Ok(mut g) = AUDIO_EVENTS.write() {
+        *g = Some(a);
+    }
+}
 
 use std::path::PathBuf;
 

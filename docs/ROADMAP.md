@@ -171,37 +171,67 @@ minisign verification.
 
 ---
 
-## Phase 2 — Core extension `[ ]`
+## Phase 2 — Core extension `[x]` (released as v0.2.0)
 
-- [ ] World selection screen & create-world screen (vanilla parity: seed, game
-      mode, difficulty, world type, game rules, data packs tab placeholder)
-- [ ] Multiple worlds in `saves/` (RCW), rename/delete/backup
-- [ ] **All non-redstone, non-minecart blocks**: crafting-table, furnace family,
-      chests/barrels/shulkers, beds, doors/trapdoors/fence gates, signs & hanging
-      signs (text editing), banners, beacons, enchanting table, anvil, grindstone,
-      stonecutter, loom, cartography, smithing, brewing stand, campfires, lanterns,
-      candles, composters, bells, scaffolding, ladders/vines, pots, cauldrons,
-      copper oxidation, crops & farming, bone meal, honey/slime (no piston logic),
-      portal frames (Nether/End travel), respawn anchors, lodestones, sculk family
-      (sensor/shrieker are redstone-adjacent → Phase 3)
-- [ ] Container UIs for all of the above with vanilla layout, recipe book
-- [ ] Crafting, smelting, brewing, enchanting, smithing recipes (data-driven,
-      vanilla recipe JSON format)
-- [ ] Hunger, saturation, food, status effects, experience, enchantments (effects
-      on tools/armour), durability, repair
-- [ ] Day/night cycle (`/time`, sleeping), weather (rain, thunder, snow by biome,
-      lightning), moon phases
-- [ ] Entity framework (ECS-style), item entities, falling blocks, XP orbs, boats,
-      arrows (as a projectile test), paintings/item frames
-- [ ] **Passive mobs**: cow, pig, sheep (shearing, dye), chicken, horse family
-      (riding/taming), wolf, cat, parrot, rabbit, fox, bee (basic), fish, squid,
-      turtle, villager (wander/idle only; trading in Phase 3), bat, frog, axolotl.
-      Vanilla AI goals (wander, panic, breed, follow, tempt), spawning rules,
-      drops, breeding, baby growth
-- [ ] Mob models & animations from the vanilla entity-texture layout
-- [ ] **Anvil import/export**: read `level.dat`, region `.mca`, entities, POI;
-      write back a valid 1.21.1 Java world. Round-trip test suite.
-- [ ] Release 0.2.0: `.exe` + `.AppImage`
+Issue #1 (feedback on 0.1.0) was worked first; every item is addressed below.
+
+- [x] World selection screen & create-world screen: name, seed, game mode,
+      difficulty, game rules page (world type / data packs → Phase 3)
+- [x] Multiple worlds in `saves/` (RCW), rename/delete/backup (`backups/`)
+- [~] Blocks with behaviour: crafting table, furnace / blast furnace / smoker,
+      chests / trapped chests / barrels, beds (sleep through the night, set
+      spawn), doors / trapdoors / fence gates, torches, ladders & vines
+      (climbing), crops & farming (hoe, farmland, seeds, growth, bone meal),
+      saplings, leaves decay, grass/mycelium spread, gravity blocks, fence /
+      pane / wall / stair shapes, cake, buckets, flint and steel, ice melting.
+      Signs, banners, beacons, enchanting, anvil, grindstone, stonecutter,
+      loom, cartography, smithing, brewing, campfires, candles, composters,
+      bells, scaffolding behaviour, cauldrons, copper oxidation, portals,
+      respawn anchors, lodestones, sculk → Phase 3
+- [~] Container UIs with vanilla layout: survival inventory with 2×2 crafting,
+      armour and off-hand slots and the player model, crafting table, chest /
+      large chest / barrel, furnace family; creative tabs (Building, Coloured,
+      Natural, Functional, Tools, Combat, Food, Ingredients, survival
+      inventory, search). Recipe book → Phase 3
+- [~] Recipes: every vanilla shaped / shapeless / smelting / blasting / smoking
+      / campfire recipe from the data generator; fuels. Brewing, enchanting,
+      smithing → Phase 3
+- [~] Hunger, saturation, exhaustion, natural regeneration / starvation,
+      eating, experience (orbs, levels), tool speeds and correct-tool drops,
+      durability. Status effects, enchantments, repair → Phase 3
+- [~] Day/night cycle (`/time`, sleeping), weather (rain, thunder, snow by
+      biome, lightning, sky dimming, `/weather`). Moon phases → Phase 3
+- [~] Entity framework: item entities (merging, pickup, despawn, per-chunk
+      cap), falling blocks, XP orbs, lightning; entities saved with their
+      chunks. Boats, arrows, paintings, item frames → Phase 3
+- [~] **Passive mobs**: cow (milking), pig, sheep (shearing, dyeing, regrowth,
+      natural colours), chicken (eggs). Wander, look, panic, tempt, breed,
+      baby growth, drops from the vanilla loot tables, biome spawning on new
+      chunks. Horse family, wolf, cat, parrot, rabbit, fox, bee, fish, squid,
+      turtle, villager, bat, frog, axolotl → Phase 3
+- [x] Mob models & animations in the vanilla entity-texture (box UV) layout;
+      first-person hand and held items; dropped items and falling blocks
+- [x] Sounds from the player's install (blocks, steps, mobs, UI, weather,
+      music) with the Music & Sounds volume screen
+- [x] Particles: block breaking/hitting, splashes
+- [x] Fluids: water and lava flow with vanilla spread rules, sources,
+      lava + water → obsidian / cobblestone
+- [x] Commands: autocompletion with hints; selectors `@s @p @a @r @e[type=,limit=]`
+      for `/tp`; `/summon`, `/weather`, `/difficulty`, `/gamerule`, `/xp`,
+      `/setworldspawn`, `/say`, `/me`
+- [x] **Anvil import/export**: `level.dat`, region `.mca` (blocks, biomes,
+      player, inventory, weather, rules) both ways; round-trip test.
+      Entities/POI import → Phase 3
+- [x] Render distance up to 128 chunks, with the memory limit enforced from
+      measured process memory (LOD beyond that in Phase 4)
+- [x] Options → Performance → "Open Data Folder"
+- [x] Release 0.2.0: `.exe` + `.AppImage`
+
+### Carried over to Phase 3
+Key rebinding; the remaining Phase 2 blocks, mobs and entities listed above;
+recipe book; status effects, enchantments and repair; moon phases; Anvil
+entity/POI import; Anvil benchmark; minisign verification; Nether/End
+features.
 
 ---
 

@@ -66,10 +66,13 @@ payload (uncompressed, little-endian) — as implemented in v1
     sky_light      tag u8: 0 absent (implicit 15) | 1 uniform + u8 value | 2 + 2048 bytes
     block_light    same encoding (absent ⇒ 0)
   heights          256 × i16 WORLD_SURFACE (other heightmaps are rebuilt on load)
-  block_entities   u32 count (0 in v0.1)
-  entities         u32 count (0 in v0.1)
-  scheduled_ticks  u32 count (0 in v0.1)
-  post_processing  u32 count (0 in v0.1)
+  block_entities   u32 count, then per entry: index u32 ((y+64)<<8 | z<<4 | x),
+                   len u32, JSON bytes (chest/furnace contents; v0.2+)
+  entities         u32 count, then per entry: len u32, JSON bytes (items,
+                   XP orbs, falling blocks, mobs; v0.2+)
+  scheduled_ticks  u32 count (always 0: pending fluid ticks are re-derived
+                   from neighbours when a chunk loads)
+  post_processing  u32 count (always 0)
 ```
 
 Record header in v1 is 30 bytes: magic, xxh3-64 of bytes 12.., cx, cz,
@@ -106,3 +109,13 @@ registries: { "block_state": [ "minecraft:stone", "minecraft:grass_block[snowy=f
 Index in each list == id used inside region files. New states are appended; ids
 are never reused. Data-version upgrades run a migration that rewrites the table
 (and, lazily, chunks on load).
+
+## v0.2 notes
+
+Block entities and entities are stored as JSON blobs inside the chunk record
+(the format is still v1: older readers stop after the heightmap, and v0.1
+records simply have zero counts). JSON keeps them readable while their
+schema settles; RCB replaces it once the entity set is complete (Phase 3).
+`world.rcw` gained `raining`, `thundering`, `rain_time`, `thunder_time`,
+`clear_weather_time`, `rules` (vanilla game-rule names → string values) and
+`world_type`, all defaulted when absent.

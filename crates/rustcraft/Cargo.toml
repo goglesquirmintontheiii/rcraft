@@ -17,6 +17,7 @@ rc_core.workspace = true
 rc_data.workspace = true
 rc_assets.workspace = true
 rc_world.workspace = true
+rc_anvil.workspace = true
 rc_worldgen.workspace = true
 rc_physics.workspace = true
 rc_entity.workspace = true

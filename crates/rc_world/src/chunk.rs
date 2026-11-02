@@ -53,6 +53,10 @@ pub struct Chunk {
     pub dirty: bool,
     /// Sky/block light arrays are up to date.
     pub light_valid: bool,
+    /// Serialized entities owned by this chunk (opaque to the storage layer).
+    pub entities: Vec<Vec<u8>>,
+    /// Serialized block entities: (local index y<<8|z<<4|x relative to min y, data).
+    pub block_entities: Vec<(u32, Vec<u8>)>,
 }
 
 impl Chunk {
@@ -64,6 +68,8 @@ impl Chunk {
             height_surface: [(WORLD_MIN_Y - 1) as i16; 256],
             dirty: false,
             light_valid: false,
+            entities: Vec::new(),
+            block_entities: Vec::new(),
         }
     }
 

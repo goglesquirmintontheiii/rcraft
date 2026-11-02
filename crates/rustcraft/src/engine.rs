@@ -17,7 +17,7 @@ use crate::game::{Game, TickInput};
 use crate::gfx::Gfx;
 use crate::options::{Graphics, Options};
 use crate::player::{GameMode, MoveInput};
-use crate::screens::{Action, Ctx, Screen, Stats, WorldSummary};
+use crate::screens::{Action, Ctx, Screen, Stats};
 use crate::world::{MeshShared, World, biome_colors};
 
 /// Keys/buttons currently held, mapped to game actions.
@@ -41,6 +41,7 @@ pub struct Edges {
     pub pick: bool,
     pub jump_pressed: bool,
     pub forward_pressed: bool,
+    pub attack_pressed: bool,
 }
 
 pub struct Engine {
@@ -54,6 +55,9 @@ pub struct Engine {
     pub edges: Edges,
     pub look_delta: (f64, f64),
     pub scroll_ticks: i32,
+    /// Smoothed FOV multiplier (sprinting/flying), eased each frame like vanilla.
+    fov_mod: f32,
+    scroll_acc: f32,
     pub stats: Stats,
     pub update: Arc<Mutex<rc_update::Status>>,
     pub f3: bool,
@@ -69,6 +73,18 @@ pub struct Engine {
     frame_times: Vec<f32>,
     pub adapter: String,
     pub backend: String,
+    pub audio: Arc<rc_audio::Audio>,
+    /// Cached world list (refreshed when the list screens open).
+    pub worlds: Vec<crate::screens::WorldSummary>,
+    pub java_worlds: Vec<(String, PathBuf)>,
+    /// Folder name (under `saves`) of the open world.
+    pub world_name: Option<String>,
+    scene_scratch: Vec<crate::models::ModelQuad>,
+    music_cooldown: u32,
+    ambient_cooldown: u32,
+    /// Render-distance cap from measured process memory (see `memory_guard`).
+    mem_rd_cap: i32,
+    mem_check: Instant,
 }
 
 impl std::fmt::Debug for Engine {
@@ -77,41 +93,14 @@ impl std::fmt::Debug for Engine {
     }
 }
 
-/// The single world slot.
-pub fn world_dir(game_dir: &Path) -> PathBuf {
-    game_dir.join("saves/world")
-}
-
-fn summary(game_dir: &Path) -> Option<WorldSummary> {
-    let m = rc_world::rcw::WorldMeta::read(&world_dir(game_dir).join("world.rcw")).ok()?;
-    let secs = m.last_played_ms / 1000;
-    let days = secs / 86_400;
-    // Civil date from days since epoch (Howard Hinnant's algorithm).
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 { y + 1 } else { y };
-    let last = if m.last_played_ms == 0 {
-        "Never played".to_owned()
-    } else {
-        format!(
-            "{y:04}-{mo:02}-{d:02} {:02}:{:02}",
-            (secs / 3600) % 24,
-            (secs / 60) % 60
-        )
-    };
-    Some(WorldSummary {
-        name: m.name,
-        seed: m.seed,
-        last_played: last,
-        mode: m.game_mode,
-    })
+/// Parameters for a brand-new world.
+#[derive(Clone, Debug)]
+pub struct NewWorld {
+    pub name: String,
+    pub seed: i64,
+    pub mode: u8,
+    pub difficulty: u8,
+    pub rules: Vec<(String, bool)>,
 }
 
 fn mesh_shared(gfx: &Gfx, opts: &Options) -> Arc<MeshShared> {
@@ -140,7 +129,19 @@ impl Engine {
         adapter: String,
         backend: String,
     ) -> Self {
-        Self {
+        let audio = Arc::new(rc_audio::Audio::new(Arc::new(gfx.assets.stack.reopen())));
+        crate::set_audio(audio.clone());
+        let worlds = crate::worlds::list(&game_dir);
+        let e = Self {
+            audio,
+            worlds,
+            java_worlds: Vec::new(),
+            world_name: None,
+            scene_scratch: Vec::with_capacity(512),
+            music_cooldown: 600,
+            mem_rd_cap: crate::options::MAX_RENDER_DISTANCE,
+            mem_check: Instant::now(),
+            ambient_cooldown: 0,
             opts,
             game_dir,
             gfx,
@@ -151,6 +152,8 @@ impl Engine {
             edges: Edges::default(),
             look_delta: (0.0, 0.0),
             scroll_ticks: 0,
+            fov_mod: 1.0,
+            scroll_acc: 0.0,
             stats: Stats::default(),
             update: Arc::new(Mutex::new(rc_update::Status::Idle)),
             f3: false,
@@ -166,6 +169,79 @@ impl Engine {
             frame_times: Vec::with_capacity(64),
             adapter,
             backend,
+        };
+        e.apply_volumes();
+        e.set_particle_sprites();
+        e
+    }
+
+    /// Render distance in use: the option, limited by the memory estimate
+    /// and by what the process actually uses.
+    #[must_use]
+    pub fn render_distance(&self) -> i32 {
+        self.opts
+            .effective_render_distance()
+            .min(self.mem_rd_cap)
+            .max(2)
+    }
+
+    /// Enforce the memory limit against real usage: step the view distance
+    /// down while over the limit, back up slowly once well under it.
+    fn memory_guard(&mut self) {
+        if self.mem_check.elapsed() < Duration::from_secs(2) || self.game.is_none() {
+            return;
+        }
+        self.mem_check = Instant::now();
+        let used = self.stats.mem_mb;
+        let limit = self.opts.max_memory_mb as f32;
+        let cur = self.render_distance();
+        if used > limit * 1.05 && cur > 2 {
+            self.mem_rd_cap = cur - 1;
+            warn!(
+                used,
+                limit,
+                rd = self.mem_rd_cap,
+                "over the memory limit; reducing render distance"
+            );
+        } else if used < limit * 0.75 && self.mem_rd_cap < self.opts.effective_render_distance() {
+            self.mem_rd_cap += 1;
+        }
+    }
+
+    /// Push option volumes into the audio system.
+    pub fn apply_volumes(&self) {
+        let mut v = self.audio.volumes.lock();
+        for (i, c) in rc_audio::Category::ALL.iter().enumerate() {
+            v.insert(*c, self.opts.volumes[i].clamp(0.0, 1.0));
+        }
+    }
+
+    fn set_particle_sprites(&self) {
+        let uv: Vec<[f32; 4]> = self.gfx.models.particle.iter().map(|s| s.uv).collect();
+        crate::PARTICLE_SPRITES.with(|p| *p.borrow_mut() = uv);
+    }
+
+    fn refresh_worlds(&mut self) {
+        self.worlds = crate::worlds::list(&self.game_dir);
+    }
+
+    fn message(&mut self, title: &str, text: impl Into<String>) {
+        self.screens.push(Screen::Message {
+            title: title.into(),
+            text: text.into(),
+        });
+    }
+
+    /// Feed raw wheel movement; emits whole notches only.
+    pub fn add_scroll(&mut self, d: f32) {
+        self.scroll_acc += d;
+        let steps = self.scroll_acc.trunc();
+        if steps != 0.0 {
+            self.scroll_acc -= steps;
+            self.input.scroll += steps;
+            if self.screens.is_empty() {
+                self.scroll_ticks += steps as i32;
+            }
         }
     }
 
@@ -216,24 +292,32 @@ impl Engine {
         std::thread::spawn(move || install_update(&st, &m));
     }
 
-    /// Open (or create) the single world.
-    pub fn open_world(&mut self, create: Option<(String, i64, bool)>) -> Result<()> {
-        let dir = world_dir(&self.game_dir);
+    /// Open the world in `saves/<dir>`, or create it from `create`.
+    pub fn open_world(&mut self, dir: Option<&str>, create: Option<NewWorld>) -> Result<()> {
+        let dir_name = match (&create, dir) {
+            (Some(c), _) => crate::worlds::new_dir_name(&self.game_dir, &c.name),
+            (None, Some(d)) => d.to_owned(),
+            (None, None) => anyhow::bail!("no world selected"),
+        };
+        let path = crate::worlds::world_path(&self.game_dir, &dir_name);
         let (name, seed) = create
             .as_ref()
-            .map_or(("World".to_owned(), 0), |c| (c.0.clone(), c.1));
-        if create.is_some() {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
+            .map_or((dir_name.clone(), 0), |c| (c.name.clone(), c.seed));
         let mut world = World::open(
-            &dir,
+            &path,
             &name,
             seed,
             self.opts.worker_threads(),
             mesh_shared(&self.gfx, &self.opts),
         )?;
-        if let Some((_, _, creative)) = create {
-            world.meta.game_mode = if creative { "creative" } else { "survival" }.into();
+        if let Some(c) = &create {
+            world.meta.game_mode =
+                ["survival", "creative", "spectator"][usize::from(c.mode.min(2))].into();
+            world.meta.difficulty =
+                ["peaceful", "easy", "normal", "hard"][usize::from(c.difficulty.min(3))].into();
+            for (k, v) in &c.rules {
+                world.meta.rules.insert(k.clone(), v.to_string());
+            }
         }
         self.gfx.terrain.clear();
         let mut g = Game::new(world);
@@ -242,6 +326,7 @@ impl Engine {
             rc_core::version::VERSION
         ));
         self.game = Some(g);
+        self.world_name = Some(dir_name);
         self.screens = vec![Screen::Loading];
         Ok(())
     }
@@ -252,6 +337,9 @@ impl Engine {
             drop(g);
         }
         self.gfx.terrain.clear();
+        self.gfx.terrain.clear_batches();
+        self.world_name = None;
+        self.refresh_worlds();
         self.screens = vec![Screen::Title];
     }
 
@@ -269,6 +357,14 @@ impl Engine {
             g.player.pitch = (g.player.pitch + (dy * k * inv) as f32).clamp(-90.0, 90.0);
         }
         self.look_delta = (0.0, 0.0);
+        // Vanilla eases the FOV modifier toward its target by half the gap per tick.
+        let target = if g.player.sprinting {
+            if g.player.flying { 1.15 } else { 1.12 }
+        } else {
+            1.0
+        };
+        let k = 1.0 - 0.5f32.powf((dt * 20.0) as f32);
+        self.fov_mod += (target - self.fov_mod) * k;
         if self.scroll_ticks != 0 && self.screens.is_empty() {
             let n = (g.inv.selected as i32 - self.scroll_ticks).rem_euclid(9);
             g.inv.selected = n as usize;
@@ -310,6 +406,7 @@ impl Engine {
                     sprint: h.sprint || self.sprint_toggle,
                 },
                 attack: h.attack,
+                attack_pressed: self.edges.attack_pressed && !in_ui,
                 use_held: h.use_item,
                 use_pressed: self.edges.use_pressed && !in_ui,
                 pick: self.edges.pick && !in_ui,
@@ -362,10 +459,8 @@ impl Engine {
         if underwater {
             fog = rgb(biome.water_fog_color);
         }
-        let rd = self.opts.effective_render_distance() as f32 * 16.0;
-        let fov = self.opts.fov
-            + if p.sprinting { 8.0 } else { 0.0 }
-            + if p.flying && p.sprinting { 4.0 } else { 0.0 };
+        let rd = self.render_distance() as f32 * 16.0;
+        let fov = self.opts.fov * self.fov_mod;
         Some(FrameParams {
             cam_pos: eye,
             yaw: p.yaw,
@@ -385,9 +480,9 @@ impl Engine {
 
     /// Stream and upload without rendering (headless warm-up).
     pub fn stream_only(&mut self, device: &wgpu::Device) {
+        let rd = self.render_distance();
         if let Some(g) = self.game.as_mut() {
-            let rd = self.opts.effective_render_distance();
-            g.world.update(g.player.pos, rd, Duration::from_millis(20));
+            g.stream(rd, Duration::from_millis(20));
             for p in g.world.unloaded.drain(..) {
                 self.gfx.terrain.remove_chunk(p.x, p.z);
             }
@@ -407,17 +502,21 @@ impl Engine {
         dt: f64,
     ) -> Vec<Action> {
         let t0 = Instant::now();
+        self.memory_guard();
         self.time += (dt * 20.0) as f32;
         self.simulate(dt);
         // Stream chunks and upload finished meshes.
+        let rd = self.render_distance();
         if let Some(g) = self.game.as_mut() {
-            let rd = self.opts.effective_render_distance();
             let budget = if matches!(self.screens.last(), Some(Screen::Loading)) {
                 Duration::from_millis(12)
+            } else if !g.player_chunk_ready() {
+                // Just teleported: spend more of the frame on arrivals.
+                Duration::from_millis(8)
             } else {
                 Duration::from_millis(3)
             };
-            g.world.update(g.player.pos, rd, budget);
+            g.stream(rd, budget);
             for p in g.world.unloaded.drain(..) {
                 self.gfx.terrain.remove_chunk(p.x, p.z);
             }
@@ -428,6 +527,50 @@ impl Engine {
                 n += 1;
                 if n > 64 && upload_start.elapsed() > Duration::from_millis(4) {
                     break;
+                }
+            }
+            // A block GUI opened this tick.
+            if g.container.is_some() && self.screens.is_empty() {
+                self.screens.push(Screen::Inventory);
+            }
+            // Sounds.
+            self.audio.set_listener(g.player.eye(1.0), g.player.yaw);
+            for snd in g.sounds.drain(..) {
+                self.audio
+                    .play(&snd.event, snd.pos, snd.volume, snd.pitch, snd.cat);
+            }
+            if self.audio.enabled() {
+                self.music_cooldown = self.music_cooldown.saturating_sub(1);
+                if self.music_cooldown == 0 {
+                    let ev = if g.player.mode == GameMode::Creative {
+                        "music.creative"
+                    } else {
+                        "music.game"
+                    };
+                    self.audio.play_music(ev);
+                    self.music_cooldown = 20 * 60 * 6;
+                }
+                // Rain ambience.
+                self.ambient_cooldown = self.ambient_cooldown.saturating_sub(1);
+                if g.rain > 0.2 && self.ambient_cooldown == 0 {
+                    let p = g.player.pos;
+                    let under = g
+                        .world
+                        .surface_y(p[0].floor() as i32, p[2].floor() as i32)
+                        .is_some_and(|y| f64::from(y) > p[1] + 1.0);
+                    let ev = if under {
+                        "weather.rain.above"
+                    } else {
+                        "weather.rain"
+                    };
+                    self.audio.play(
+                        ev,
+                        None,
+                        0.2 * g.rain,
+                        if under { 0.5 } else { 1.0 },
+                        rc_audio::Category::Weather,
+                    );
+                    self.ambient_cooldown = 25;
                 }
             }
             if g.player.dead() && !matches!(self.screens.last(), Some(Screen::Death)) {
@@ -448,14 +591,14 @@ impl Engine {
             && !matches!(self.screens.last(), Some(Screen::Loading))
         {
             let g = self.game.as_ref().expect("game");
-            let day = g.world.meta.day_time.rem_euclid(24000) as f32 / 24000.0;
-            let daylight = ((day - 0.25) * std::f32::consts::TAU)
-                .cos()
-                .mul_add(2.0, 0.5)
-                .clamp(0.2, 1.0);
-            self.gfx
-                .terrain
-                .update_lightmap(queue, daylight, self.opts.brightness, false);
+            let daylight = crate::scene::daylight(g, partial as f32).max(0.2);
+            let flash = g.flash > 0;
+            self.gfx.terrain.update_lightmap(
+                queue,
+                if flash { 1.0 } else { daylight },
+                self.opts.brightness,
+                false,
+            );
             self.gfx
                 .terrain
                 .update_animations(queue, &self.gfx.models.atlas, g.tick);
@@ -469,6 +612,17 @@ impl Engine {
                 }
             }
             let outline = g.target_outline();
+            let cam = crate::scene::Cam::new(params.cam_pos, params.yaw, params.pitch);
+            let first_person =
+                !self.hud_hidden && !matches!(self.screens.last(), Some(Screen::Death));
+            crate::scene::fill(
+                &mut self.gfx,
+                g,
+                &cam,
+                partial,
+                first_person,
+                &mut self.scene_scratch,
+            );
             self.gfx.terrain.render(
                 device,
                 queue,
@@ -493,14 +647,17 @@ impl Engine {
         self.gfx.dl.clear();
         let mut dl = std::mem::take(&mut self.gfx.dl);
         let update = self.update.lock().clone();
-        let world_summary = summary(&self.game_dir);
         let mut actions = Vec::new();
+        let worlds = std::mem::take(&mut self.worlds);
+        let java_worlds = std::mem::take(&mut self.java_worlds);
         {
             let mut cx = Ctx {
                 opts: &mut self.opts,
                 gfx: &self.gfx,
                 game: self.game.as_mut(),
-                world: world_summary,
+                worlds,
+                java_worlds,
+                audio: Some(&self.audio),
                 update,
                 stats: &self.stats,
                 f3: self.f3,
@@ -523,6 +680,17 @@ impl Engine {
             if let Some(top) = self.screens.last_mut() {
                 actions = top.draw(&mut ui, &mut cx);
             }
+            self.worlds = std::mem::take(&mut cx.worlds);
+            self.java_worlds = std::mem::take(&mut cx.java_worlds);
+        }
+        if self.input.clicked_sound {
+            self.audio.play(
+                "ui.button.click",
+                None,
+                0.25,
+                1.0,
+                rc_audio::Category::Master,
+            );
         }
         self.input.end_frame();
         let clear = (!world_drawn).then_some(wgpu::Color::BLACK);
@@ -571,7 +739,16 @@ impl Engine {
         let mut rebuild = false;
         for a in actions {
             match a {
-                Action::Push(s) => self.screens.push(s),
+                Action::Push(s) => {
+                    match &s {
+                        Screen::SelectWorld { .. } => self.refresh_worlds(),
+                        Screen::ImportWorld { .. } => {
+                            self.java_worlds = crate::java::find_java_worlds()
+                        }
+                        _ => {}
+                    }
+                    self.screens.push(s);
+                }
                 Action::Pop => {
                     self.screens.pop();
                     if self.screens.is_empty() && self.game.is_none() {
@@ -580,24 +757,103 @@ impl Engine {
                     self.save_options();
                 }
                 Action::CloseAll => {
+                    if let Some(g) = self.game.as_mut() {
+                        g.close_container();
+                    }
                     self.screens.clear();
                     if self.game.is_none() {
                         self.screens.push(Screen::Title);
                     }
                 }
-                Action::PlayWorld => {
-                    if let Err(e) = self.open_world(None) {
+                Action::PlayWorld(dir) => {
+                    if let Err(e) = self.open_world(Some(&dir), None) {
                         warn!("opening world: {e:#}");
+                        self.message("Could not open world", format!("{e:#}"));
                     }
                 }
                 Action::CreateWorld {
                     name,
                     seed,
-                    creative,
+                    mode,
+                    difficulty,
+                    rules,
                 } => {
-                    if let Err(e) = self.open_world(Some((name, seed, creative))) {
+                    if let Err(e) = self.open_world(
+                        None,
+                        Some(NewWorld {
+                            name,
+                            seed,
+                            mode,
+                            difficulty,
+                            rules,
+                        }),
+                    ) {
                         warn!("creating world: {e:#}");
+                        self.message("Could not create world", format!("{e:#}"));
                     }
+                }
+                Action::RenameWorld(dir, name) => {
+                    if let Err(e) = crate::worlds::rename(&self.game_dir, &dir, &name) {
+                        self.message("Rename failed", format!("{e:#}"));
+                    }
+                    self.refresh_worlds();
+                }
+                Action::DeleteWorld(dir) => {
+                    if let Err(e) = crate::worlds::delete(&self.game_dir, &dir) {
+                        self.message("Delete failed", format!("{e:#}"));
+                    }
+                    self.refresh_worlds();
+                }
+                Action::BackupWorld(dir) => match crate::worlds::backup(&self.game_dir, &dir) {
+                    Ok(p) => self.message("Backup created", p.display().to_string()),
+                    Err(e) => self.message("Backup failed", format!("{e:#}")),
+                },
+                Action::ImportJava(path) => {
+                    let src = PathBuf::from(&path);
+                    let name = src
+                        .file_name()
+                        .map_or("Imported".into(), |n| n.to_string_lossy().into_owned());
+                    let dir = crate::worlds::new_dir_name(&self.game_dir, &name);
+                    let dest = crate::worlds::world_path(&self.game_dir, &dir);
+                    match crate::java::import(&src, &dest) {
+                        Ok(msg) => {
+                            self.screens.pop();
+                            self.refresh_worlds();
+                            self.message("World imported", msg);
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_dir_all(&dest);
+                            self.message("Import failed", format!("{e:#}"));
+                        }
+                    }
+                }
+                Action::ExportJava(dir) => {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let dest = self
+                        .game_dir
+                        .join("exports")
+                        .join(format!("{dir}_java_{ts}"));
+                    if self.world_name.as_deref() == Some(dir.as_str())
+                        && let Some(g) = self.game.as_mut()
+                    {
+                        g.save();
+                    }
+                    match crate::java::export(
+                        &crate::worlds::world_path(&self.game_dir, &dir),
+                        &dest,
+                    ) {
+                        Ok(msg) => self.message(
+                            "Exported for Java Edition",
+                            format!("{msg}. Copy the folder into .minecraft/saves to play it."),
+                        ),
+                        Err(e) => self.message("Export failed", format!("{e:#}")),
+                    }
+                }
+                Action::VolumesChanged => {
+                    self.apply_volumes();
+                    self.save_options();
                 }
                 Action::SaveAndQuit => self.close_world(),
                 Action::Quit => self.quit = true,
@@ -621,6 +877,7 @@ impl Engine {
                     }
                 }
                 Action::ToggleFullscreen => self.wants_fullscreen = Some(self.opts.fullscreen),
+                Action::OpenDataFolder => open_folder(&self.game_dir),
             }
         }
         rebuild
@@ -629,6 +886,7 @@ impl Engine {
     /// Replace GPU-side resources (after mipmap/asset changes).
     pub fn replace_gfx(&mut self, gfx: Gfx) {
         self.gfx = gfx;
+        self.set_particle_sprites();
         if let Some(g) = self.game.as_mut() {
             g.world.set_mesh_shared(mesh_shared(&self.gfx, &self.opts));
         }
@@ -659,6 +917,7 @@ impl Engine {
                         .is_some_and(|g| g.player.mode == GameMode::Creative);
                     self.screens.push(if creative {
                         Screen::Creative {
+                            tab: crate::containers::CreativeTab::Items(crate::items::Tab::Building),
                             scroll: 0.0,
                             search: String::new(),
                         }
@@ -667,14 +926,16 @@ impl Engine {
                     });
                 }
                 Some(Screen::Inventory) => {
-                    if let Some(g) = self.game.as_mut()
-                        && let Some(c) = g.inv.cursor.take()
-                    {
-                        g.inv.add(c.item, c.count);
+                    if let Some(g) = self.game.as_mut() {
+                        g.close_container();
                     }
                     self.screens.clear();
                 }
-                Some(Screen::Creative { ref search, .. }) if search.is_empty() => {
+                Some(Screen::Creative {
+                    ref search,
+                    ref tab,
+                    ..
+                }) if search.is_empty() || *tab != crate::containers::CreativeTab::Search => {
                     if let Some(g) = self.game.as_mut() {
                         g.inv.cursor = None;
                     }
@@ -700,12 +961,13 @@ impl Engine {
             }
             GameKey::F3 => self.f3 = !self.f3,
             GameKey::F1 => self.hud_hidden = !self.hud_hidden,
-            GameKey::Drop => {
+            GameKey::Drop(whole) => {
                 if top.is_none()
                     && let Some(g) = self.game.as_mut()
-                    && g.player.mode == GameMode::Survival
+                    && g.player.mode != GameMode::Spectator
                 {
-                    g.inv.consume_held();
+                    g.drop_held(whole);
+                    g.swing = 6;
                 }
             }
         }
@@ -720,7 +982,8 @@ pub enum GameKey {
     Hotbar(usize),
     F3,
     F1,
-    Drop,
+    /// Q (true with Ctrl: whole stack).
+    Drop(bool),
 }
 
 fn install_update(st: &Arc<Mutex<rc_update::Status>>, m: &rc_update::Manifest) {
@@ -781,5 +1044,19 @@ fn push_box_overlay(out: &mut Vec<QuadVertex>, p: BlockPos, b: [f64; 6], s: rc_a
                 color: [0.0, 0.0, 0.0, 0.7],
             });
         }
+    }
+}
+
+/// Show a folder in the platform file manager.
+fn open_folder(dir: &Path) {
+    let cmd = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(cmd).arg(dir).spawn() {
+        warn!("could not open {}: {e}", dir.display());
     }
 }

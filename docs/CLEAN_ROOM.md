@@ -36,3 +36,17 @@ When a non-obvious behaviour is implemented, add a line here or a doc comment:
 | worldgen | density-function semantics, cell interpolation order | minecraft.wiki "Density function", "Noise router"; verified against saved chunks |
 | worldgen | multi-noise R-tree selection | minecraft.wiki "Biome/Multi-noise"; verified 100% vs reference worlds |
 | worldgen | feature placement modifiers & feature configs | minecraft.wiki "Placed feature", "Configured feature" |
+| gameplay | block breaking time, tool tiers, correct-tool drops | minecraft.wiki "Breaking"; tool rules from the data generator's item components |
+| gameplay | hunger, saturation, exhaustion, regeneration | minecraft.wiki "Hunger" |
+| gameplay | experience levels and orb values | minecraft.wiki "Experience" |
+| gameplay | fluid spread (levels, falling, slope search, ticks) | minecraft.wiki "Water", "Lava", "Fluid" |
+| gameplay | crop growth, bone meal, farmland, saplings, leaf decay | minecraft.wiki "Crops", "Bone Meal", "Farmland", "Leaves" |
+| gameplay | weather timers, lightning, sleeping | minecraft.wiki "Weather", "Bed" |
+| gameplay | ladder / vine climbing speeds | minecraft.wiki "Ladder" |
+| gameplay | recipes, loot tables, tags | Mojang data-generator output (data, ADR-015) |
+| entities | item entity pickup delay, merging, despawn | minecraft.wiki "Item (entity)" |
+| entities | passive mob behaviour, breeding, baby growth, sheep colours | minecraft.wiki "Cow", "Pig", "Sheep", "Chicken", "Breeding" |
+| entities | model shapes in the box-UV texture layout | minecraft.wiki "Model" and the public texture layouts; geometry authored by hand |
+| audio | sound events and variants | the player's own `sounds.json` (asset index), minecraft.wiki "Sounds.json" |
+| formats | `level.dat`, region `.mca`, chunk NBT, player NBT | minecraft.wiki "Java Edition level format", "Region file format", "Chunk format", "Player.dat format" |
+

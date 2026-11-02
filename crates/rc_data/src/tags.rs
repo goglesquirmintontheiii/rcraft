@@ -41,6 +41,9 @@ pub struct Tags {
     block: AHashMap<String, BlockSet>,
     block_order: AHashMap<String, Vec<u16>>,
     biome: AHashMap<String, AHashSet<String>>,
+    /// Item and entity-type tags as plain names (`stick`, `cow`).
+    item: AHashMap<String, Vec<String>>,
+    entity: AHashMap<String, Vec<String>>,
     nblocks: usize,
 }
 
@@ -127,10 +130,28 @@ impl Tags {
             );
             biome.insert(key, names.into_iter().collect());
         }
+        let names_of = |dir: &str| -> AHashMap<String, Vec<String>> {
+            files
+                .list(dir)
+                .into_iter()
+                .map(|name| {
+                    let key = format!("minecraft:{name}");
+                    let mut names = Vec::new();
+                    resolve_names(files, dir, &key, &mut AHashSet::new(), &mut names);
+                    let plain = names
+                        .into_iter()
+                        .map(|n| n.trim_start_matches("minecraft:").to_owned())
+                        .collect();
+                    (key, plain)
+                })
+                .collect()
+        };
         Self {
             block,
             block_order,
             biome,
+            item: names_of("tags/item"),
+            entity: names_of("tags/entity_type"),
             nblocks: blocks.defs.len(),
         }
     }
@@ -158,6 +179,18 @@ impl Tags {
     #[must_use]
     pub fn block_ref(&self, tag: &str) -> Option<&BlockSet> {
         self.block.get(&norm(tag))
+    }
+
+    /// Item names (without namespace) in an item tag.
+    #[must_use]
+    pub fn item_list(&self, tag: &str) -> &[String] {
+        self.item.get(&norm(tag)).map_or(&[], Vec::as_slice)
+    }
+
+    /// Entity type names in an entity-type tag.
+    #[must_use]
+    pub fn entity_list(&self, tag: &str) -> &[String] {
+        self.entity.get(&norm(tag)).map_or(&[], Vec::as_slice)
     }
 
     /// Biome ids (`minecraft:plains`) in a biome tag.

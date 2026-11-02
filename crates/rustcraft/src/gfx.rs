@@ -25,7 +25,51 @@ pub enum Icon {
     None,
 }
 
+/// How an item is drawn in the world (dropped, held).
+#[derive(Clone, Copy, Debug)]
+pub enum WorldIcon {
+    Block(BlockStateId),
+    /// Batch texture index, UV rectangle, tint.
+    Flat(usize, [f32; 4], [f32; 4]),
+    None,
+}
+
+/// Batch texture indices registered with the terrain renderer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EntityTextures {
+    pub cow: usize,
+    pub pig: usize,
+    pub sheep: usize,
+    pub sheep_fur: usize,
+    pub chicken: usize,
+    pub player: usize,
+    pub xp: usize,
+    pub rain: usize,
+    pub snow: usize,
+    pub white: usize,
+    pub items: usize,
+}
+
+/// Prebuilt entity models (built once, posed per frame).
+#[derive(Debug)]
+pub struct MobModels {
+    pub cow: crate::models::Model,
+    pub pig: crate::models::Model,
+    pub sheep: crate::models::Model,
+    pub sheep_fur: crate::models::Model,
+    pub chicken: crate::models::Model,
+    pub player: crate::models::Model,
+    /// Just the right arm (first-person hand).
+    pub arm: crate::models::Model,
+}
+
 pub struct Gfx {
+    pub item_world: Vec<WorldIcon>,
+    pub tex: EntityTextures,
+    pub mob_models: MobModels,
+    /// Player skin as a GUI texture (inventory preview).
+    pub skin_gui: TexId,
+    model_scratch: std::cell::RefCell<Vec<crate::models::ModelQuad>>,
     pub terrain: TerrainRenderer,
     pub gui: GuiRenderer,
     pub assets: Assets,
@@ -66,7 +110,7 @@ fn read_sprite(
     Some(Sprite::new(tex, img.w, img.h, border))
 }
 
-fn tint_rgb(t: Tint) -> [f32; 3] {
+pub fn tint_rgb(t: Tint) -> [f32; 3] {
     let c = match t {
         Tint::None => return [1.0; 3],
         Tint::Grass => 0x91_bd_59,
@@ -103,7 +147,7 @@ fn block_icon(models: &BlockModels, s: BlockStateId) -> Icon {
                 // Y rotation then X rotation.
                 let (x1, z1) = (x * cy + z * sy, -x * sy + z * cy);
                 let (y2, z2) = (y * cx - z1 * sx, y * sx + z1 * cx);
-                pts[k] = [0.5 + x1 * 0.625 * 1.6, 0.5 - y2 * 0.625 * 1.6];
+                pts[k] = [0.5 + x1 * 0.625 * 1.12, 0.5 - y2 * 0.625 * 1.12];
                 depth += z2;
             }
             let shade = match q.dir {
@@ -184,6 +228,7 @@ impl Gfx {
             header_separator: sp("gui/header_separator"),
             footer_separator: sp("gui/footer_separator"),
             panorama: Vec::new(),
+            dirt: sp("block/dirt"),
             checkbox: sp("gui/sprites/widget/checkbox"),
             checkbox_selected: sp("gui/sprites/widget/checkbox_selected"),
             hotbar: sp("gui/sprites/hud/hotbar"),
@@ -219,7 +264,47 @@ impl Gfx {
                 .collect(),
             scroller: sp("gui/sprites/container/creative_inventory/scroller"),
             slot_highlight: None,
+            extra: std::collections::HashMap::new(),
         };
+        let mut extra = |key: String, path: String| {
+            if let Some(sp) = read_sprite(&mut gui, device, queue, &assets, &path) {
+                theme.extra.insert(key, sp);
+            }
+        };
+        for c in [
+            "crafting_table",
+            "generic_54",
+            "furnace",
+            "blast_furnace",
+            "smoker",
+        ] {
+            extra(c.into(), format!("gui/container/{c}"));
+        }
+        for c in ["furnace", "blast_furnace", "smoker"] {
+            extra(
+                format!("{c}_lit"),
+                format!("gui/sprites/container/{c}/lit_progress"),
+            );
+            extra(
+                format!("{c}_burn"),
+                format!("gui/sprites/container/{c}/burn_progress"),
+            );
+        }
+        extra(
+            "tab_inventory".into(),
+            "gui/container/creative_inventory/tab_inventory".into(),
+        );
+        for tb in ["top", "bottom"] {
+            for sel in ["selected", "unselected"] {
+                for i in 1..=7 {
+                    extra(
+                        format!("tab_{tb}_{sel}_{i}"),
+                        format!("gui/sprites/container/creative_inventory/tab_{tb}_{sel}_{i}"),
+                    );
+                }
+            }
+        }
+        let mut sp = |p: &str| read_sprite(&mut gui, device, queue, &assets, p);
         for i in 0..4 {
             if let Some(s) = sp(&format!("gui/title/background/panorama_{i}")) {
                 theme.panorama.push(s);
@@ -232,12 +317,23 @@ impl Gfx {
         // Item icons.
         let it = items();
         let mut icons = vec![Icon::None; it.names.len()];
+        let mut item_world = vec![WorldIcon::None; it.names.len()];
         let mut item_sprites: AHashMap<String, (TexId, [f32; 4])> = AHashMap::new();
         let mut item_imgs: Vec<(String, Image, Option<rc_assets::atlas::Animation>)> = Vec::new();
         let mut flat: Vec<(usize, String)> = Vec::new();
         for (i, name) in it.names.iter().enumerate() {
             if let Some(tex) = flat_item_texture(&assets, name) {
                 flat.push((i, tex));
+            }
+        }
+        if !assets.is_vanilla() {
+            // Generated icons for items that are not blocks.
+            for (i, name) in it.names.iter().enumerate() {
+                if it.block[i].is_none() {
+                    let id = format!("rustcraft:item/{name}");
+                    item_imgs.push((id.clone(), crate::fallback_tex::item_icon(name), None));
+                    flat.push((i, id));
+                }
             }
         }
         for (_, tex) in &flat {
@@ -250,6 +346,64 @@ impl Gfx {
             }
         }
         let item_atlas = rc_assets::atlas::build(item_imgs, 1);
+        let mut terrain = terrain;
+        let mut ent = |name: &str, fallback: fn() -> Image, repeat: bool| {
+            let img = assets
+                .png(&format!("minecraft:{name}"))
+                .unwrap_or_else(fallback);
+            terrain.add_texture(device, queue, &img, name, repeat)
+        };
+        let etex = EntityTextures {
+            cow: ent(
+                "entity/cow/cow",
+                || crate::fallback_tex::mob([0.35, 0.24, 0.16], [0.93, 0.93, 0.9]),
+                false,
+            ),
+            pig: ent(
+                "entity/pig/pig",
+                || crate::fallback_tex::mob([0.94, 0.65, 0.63], [0.85, 0.5, 0.5]),
+                false,
+            ),
+            sheep: ent(
+                "entity/sheep/sheep",
+                || crate::fallback_tex::mob([0.85, 0.75, 0.68], [0.8, 0.7, 0.62]),
+                false,
+            ),
+            sheep_fur: ent(
+                "entity/sheep/sheep_fur",
+                || crate::fallback_tex::mob([0.95, 0.95, 0.95], [0.9, 0.9, 0.9]),
+                false,
+            ),
+            chicken: ent(
+                "entity/chicken",
+                || crate::fallback_tex::mob([0.97, 0.97, 0.97], [0.95, 0.75, 0.2]),
+                false,
+            ),
+            player: ent("entity/player/wide/steve", crate::fallback_tex::skin, false),
+            xp: ent("entity/experience_orb", crate::fallback_tex::orbs, false),
+            rain: ent("environment/rain", crate::fallback_tex::rain, true),
+            snow: ent("environment/snow", crate::fallback_tex::snow, true),
+            white: ent("rustcraft:white", crate::fallback_tex::white, false),
+            items: terrain.add_texture(device, queue, &item_atlas.mips[0], "item-atlas", false),
+        };
+        let skin_img = assets
+            .png("minecraft:entity/player/wide/steve")
+            .unwrap_or_else(crate::fallback_tex::skin);
+        let skin_gui = gui.register(device, queue, &skin_img, false);
+        let player_model = crate::models::player();
+        let arm = crate::models::Model {
+            parts: vec![player_model.parts[2].clone()],
+            tex: player_model.tex,
+        };
+        let mob_models = MobModels {
+            cow: crate::models::cow(),
+            pig: crate::models::pig(),
+            sheep: crate::models::sheep(),
+            sheep_fur: crate::models::sheep_fur(),
+            chicken: crate::models::chicken(),
+            player: player_model,
+            arm,
+        };
         let item_atlas_tex = gui.register(device, queue, &item_atlas.mips[0], false);
         for (name, s) in &item_atlas.sprites {
             item_sprites.insert(name.clone(), (item_atlas_tex, s.uv));
@@ -268,6 +422,7 @@ impl Gfx {
                 [c[0], c[1], c[2], 1.0]
             });
             icons[*i] = Icon::Sprite(t, uv, tint);
+            item_world[*i] = WorldIcon::Flat(if t == atlas_tex { 0 } else { etex.items }, uv, tint);
         }
         for (i, b) in it.block.iter().enumerate() {
             if !matches!(icons[i], Icon::None) {
@@ -277,6 +432,12 @@ impl Gfx {
             // Fallback pack: plants are flat sprites, the rest 3D.
             let layer = models.layers[b.0 as usize];
             let flat_shape = blocks.collision(b).is_empty() && layer == rc_assets::Layer::Cutout;
+            item_world[i] = if flat_shape {
+                let c = tint_rgb(models.tints[b.0 as usize]);
+                WorldIcon::Flat(0, models.particle[b.0 as usize].uv, [c[0], c[1], c[2], 1.0])
+            } else {
+                WorldIcon::Block(b)
+            };
             icons[i] = if flat_shape && !assets.is_vanilla() {
                 Icon::Sprite(atlas_tex, models.particle[b.0 as usize].uv, {
                     let c = tint_rgb(models.tints[b.0 as usize]);
@@ -289,6 +450,11 @@ impl Gfx {
         let grass_map = assets.png("minecraft:colormap/grass");
         let foliage_map = assets.png("minecraft:colormap/foliage");
         Ok(Self {
+            item_world,
+            tex: etex,
+            mob_models,
+            skin_gui,
+            model_scratch: std::cell::RefCell::new(Vec::with_capacity(256)),
             terrain,
             gui,
             assets,
@@ -326,6 +492,71 @@ impl Gfx {
                     [0.8, 0.0, 0.8, 1.0],
                 );
             }
+        }
+    }
+}
+
+impl Gfx {
+    /// Draw the player model in a GUI box (feet at `(x, y)`, `size` units
+    /// per block-ish), turned to follow the mouse offset like vanilla.
+    pub fn draw_player(
+        &self,
+        dl: &mut DrawList,
+        scale: f32,
+        x: f32,
+        y: f32,
+        size: f32,
+        mdx: f32,
+        mdy: f32,
+    ) {
+        let mut q = self.model_scratch.borrow_mut();
+        q.clear();
+        let body_yaw = (mdx / 40.0).atan() * 20f32.to_radians() / 0.785;
+        let head_yaw = (mdx / 40.0).atan() * 40f32.to_radians() / 0.785;
+        let head_pitch = -(mdy / 40.0).atan() * 20f32.to_radians() / 0.785;
+        crate::models::build(
+            &self.mob_models.player,
+            |n| {
+                if n == "head" {
+                    [head_pitch, head_yaw - body_yaw, 0.0]
+                } else {
+                    [0.0; 3]
+                }
+            },
+            &mut q,
+        );
+        // Rotate whole model by body yaw (turning towards the mouse) plus
+        // vanilla's 180° so we see the front.
+        let (sy, cy) = body_yaw.sin_cos();
+        let k = size / 16.0 * 0.9;
+        let mut tris: Vec<(f32, [[f32; 2]; 4], [[f32; 2]; 4], f32)> = Vec::with_capacity(q.len());
+        for m in q.iter() {
+            let mut depth = 0.0;
+            let mut pts = [[0.0f32; 2]; 4];
+            for (i, p) in m.pos.iter().enumerate() {
+                let (px, pz) = (p[0] * cy + p[2] * sy, -p[0] * sy + p[2] * cy);
+                pts[i] = [(x - px * k) * scale, (y + (p[1] - 24.0) * k) * scale];
+                depth += pz;
+            }
+            let n = m.normal;
+            let nz = -n[0] * sy + n[2] * cy;
+            // Viewer looks along +Z in model space (faces with -Z normals are visible).
+            if nz > 0.01 {
+                continue;
+            }
+            let shade = if n[1] < -0.5 {
+                1.0
+            } else if n[0].abs() > 0.5 {
+                0.75
+            } else {
+                0.9
+            };
+            tris.push((depth, pts, m.uv, shade));
+        }
+        // Painter's order: farthest (largest z) first.
+        tris.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, pts, uv, s) in tris {
+            dl.quad_pts(self.skin_gui, pts, uv, [s, s, s, 1.0]);
         }
     }
 }

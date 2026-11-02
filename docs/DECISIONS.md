@@ -104,3 +104,32 @@ not committed.
 Item entities need the entity system planned for Phase 2. Until then a block
 broken in survival adds its drop directly to the inventory; blocks that need a
 tool drop nothing, as with a bare hand in vanilla.
+
+## ADR-019 Item entities replace direct-to-inventory drops
+Decided 2026-11-02 (Phase 2), supersedes ADR-018. Broken blocks, mob drops
+and `Q` spawn item entities with vanilla pickup delay, merging of nearby
+equal stacks and a five-minute despawn. To keep large farms cheap, item
+entities only tick physics while moving, merge checks run every 10 ticks,
+and above 48 item entities in a chunk the merge radius widens from 0.75 to
+4 blocks; above 96 the oldest are removed.
+
+## ADR-020 Entities and block entities live in the chunk record
+Decided 2026-11-02 (Phase 2). Entities are saved with the chunk they stand in
+(on unload and on save) and restored when it loads, like vanilla's entity
+chunks but inside the same RCW record, so a chunk and its contents are
+written atomically. Payloads are JSON for now (see WORLD_FORMAT.md).
+
+## ADR-021 Render distance 2–128 with a measured memory guard
+Decided 2026-11-02 (Phase 2, owner request). Full-detail render distance goes
+up to 128 chunks; LOD rendering (Phase 4) will extend the view to 1024
+chunks. The memory limit is applied twice: an estimate caps the distance up
+front (~250 MiB fixed + ~0.6 MiB per chunk), and every two seconds the engine
+compares measured process memory with the limit, stepping the distance down
+while over 105 % and back up while under 75 % (issue #1: 900 MB used with a
+~400 MB limit).
+
+## ADR-022 Sounds and entity textures come from the player's install
+Decided 2026-11-02 (Phase 2), extends ADR-005. Sounds are read from the
+launcher's hashed object store via the 1.21.1 asset index; entity, weather
+and skin textures from the jar. With no install the game is silent and uses
+procedurally generated stand-ins (`fallback_tex.rs`), never Mojang files.

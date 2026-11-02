@@ -49,8 +49,14 @@ impl Assets {
                         .is_some() =>
                 {
                     info!(path = %p.display(), "using vanilla assets from the player's install");
+                    let mut sources = vec![src];
+                    // Sounds and sounds.json live in the launcher's object store.
+                    if let Some(o) = AssetSource::objects_for_jar(&p) {
+                        info!(source = ?o, "using the launcher asset index for sounds");
+                        sources.push(o);
+                    }
                     return Self {
-                        stack: AssetStack { sources: vec![src] },
+                        stack: AssetStack { sources },
                         origin: Origin::Vanilla(p),
                     };
                 }

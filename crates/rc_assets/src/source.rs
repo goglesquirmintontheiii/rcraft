@@ -18,6 +18,12 @@ pub enum AssetSource {
         archive: Mutex<zip::ZipArchive<File>>,
         names: AHashMap<String, usize>,
     },
+    /// The launcher's hashed object store (`assets/objects`), keyed by
+    /// `assets/<namespace>/<path>` through an asset index.
+    Objects {
+        index: PathBuf,
+        files: AHashMap<String, PathBuf>,
+    },
 }
 
 impl std::fmt::Debug for AssetSource {
@@ -25,6 +31,9 @@ impl std::fmt::Debug for AssetSource {
         match self {
             Self::Dir(p) => write!(f, "Dir({})", p.display()),
             Self::Zip { path, .. } => write!(f, "Zip({})", path.display()),
+            Self::Objects { index, files } => {
+                write!(f, "Objects({}, {} files)", index.display(), files.len())
+            }
         }
     }
 }
@@ -49,6 +58,31 @@ impl AssetSource {
         })
     }
 
+    /// Open the launcher asset index that belongs to a client jar
+    /// (`versions/<v>/<v>.jar` → `versions/<v>/<v>.json` → `assets/indexes/<id>.json`).
+    #[must_use]
+    pub fn objects_for_jar(jar: &Path) -> Option<Self> {
+        let vdir = jar.parent()?;
+        let mc = vdir.parent()?.parent()?;
+        let vjson = vdir.join(format!("{}.json", vdir.file_name()?.to_string_lossy()));
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(vjson).ok()?).ok()?;
+        let id = v["assetIndex"]["id"].as_str()?.to_owned();
+        let index = mc.join("assets/indexes").join(format!("{id}.json"));
+        let idx: serde_json::Value = serde_json::from_slice(&std::fs::read(&index).ok()?).ok()?;
+        let objects = mc.join("assets/objects");
+        let mut files = AHashMap::new();
+        for (k, o) in idx["objects"].as_object()? {
+            let Some(h) = o["hash"].as_str() else {
+                continue;
+            };
+            if h.len() < 2 {
+                continue;
+            }
+            files.insert(format!("assets/{k}"), objects.join(&h[..2]).join(h));
+        }
+        Some(Self::Objects { index, files })
+    }
+
     /// Read `path` (relative, `/`-separated, e.g. `assets/minecraft/…`).
     #[must_use]
     pub fn read(&self, path: &str) -> Option<Vec<u8>> {
@@ -62,6 +96,7 @@ impl AssetSource {
                 f.read_to_end(&mut v).ok()?;
                 Some(v)
             }
+            Self::Objects { files, .. } => std::fs::read(files.get(path)?).ok(),
         }
     }
 
@@ -98,6 +133,15 @@ impl AssetSource {
                 v.sort();
                 v
             }
+            Self::Objects { files, .. } => {
+                let mut v: Vec<String> = files
+                    .keys()
+                    .filter(|n| n.starts_with(prefix))
+                    .cloned()
+                    .collect();
+                v.sort();
+                v
+            }
         }
     }
 }
@@ -117,6 +161,24 @@ impl AssetStack {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
+    }
+
+    /// An independent copy (zips reopened) for use on another thread.
+    #[must_use]
+    pub fn reopen(&self) -> Self {
+        let sources = self
+            .sources
+            .iter()
+            .filter_map(|s| match s {
+                AssetSource::Dir(p) => Some(AssetSource::Dir(p.clone())),
+                AssetSource::Zip { path, .. } => AssetSource::open(path).ok(),
+                AssetSource::Objects { index, files } => Some(AssetSource::Objects {
+                    index: index.clone(),
+                    files: files.clone(),
+                }),
+            })
+            .collect();
+        Self { sources }
     }
 
     /// `minecraft:block/stone` → `assets/minecraft/<kind>/block/stone<ext>`.

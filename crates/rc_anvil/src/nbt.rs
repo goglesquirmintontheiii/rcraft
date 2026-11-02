@@ -203,3 +203,114 @@ mod tests {
         assert_eq!(t.get("l").unwrap().as_list().len(), 2);
     }
 }
+
+fn type_id(t: &Tag) -> u8 {
+    match t {
+        Tag::End => 0,
+        Tag::Byte(_) => 1,
+        Tag::Short(_) => 2,
+        Tag::Int(_) => 3,
+        Tag::Long(_) => 4,
+        Tag::Float(_) => 5,
+        Tag::Double(_) => 6,
+        Tag::ByteArray(_) => 7,
+        Tag::String(_) => 8,
+        Tag::List(_) => 9,
+        Tag::Compound(_) => 10,
+        Tag::IntArray(_) => 11,
+        Tag::LongArray(_) => 12,
+    }
+}
+
+fn write_str(out: &mut Vec<u8>, s: &str) {
+    // Java "modified UTF-8" equals UTF-8 for the BMP characters we write.
+    let b = s.as_bytes();
+    out.extend_from_slice(&(b.len() as u16).to_be_bytes());
+    out.extend_from_slice(b);
+}
+
+fn write_payload(out: &mut Vec<u8>, t: &Tag) {
+    match t {
+        Tag::End => {}
+        Tag::Byte(v) => out.push(*v as u8),
+        Tag::Short(v) => out.extend_from_slice(&v.to_be_bytes()),
+        Tag::Int(v) => out.extend_from_slice(&v.to_be_bytes()),
+        Tag::Long(v) => out.extend_from_slice(&v.to_be_bytes()),
+        Tag::Float(v) => out.extend_from_slice(&v.to_bits().to_be_bytes()),
+        Tag::Double(v) => out.extend_from_slice(&v.to_bits().to_be_bytes()),
+        Tag::ByteArray(v) => {
+            out.extend_from_slice(&(v.len() as i32).to_be_bytes());
+            out.extend(v.iter().map(|b| *b as u8));
+        }
+        Tag::String(s) => write_str(out, s),
+        Tag::List(v) => {
+            out.push(v.first().map_or(0, type_id));
+            out.extend_from_slice(&(v.len() as i32).to_be_bytes());
+            for e in v {
+                write_payload(out, e);
+            }
+        }
+        Tag::Compound(v) => {
+            for (k, e) in v {
+                out.push(type_id(e));
+                write_str(out, k);
+                write_payload(out, e);
+            }
+            out.push(0);
+        }
+        Tag::IntArray(v) => {
+            out.extend_from_slice(&(v.len() as i32).to_be_bytes());
+            for e in v {
+                out.extend_from_slice(&e.to_be_bytes());
+            }
+        }
+        Tag::LongArray(v) => {
+            out.extend_from_slice(&(v.len() as i32).to_be_bytes());
+            for e in v {
+                out.extend_from_slice(&e.to_be_bytes());
+            }
+        }
+    }
+}
+
+/// Serialize `t` as an unnamed-root NBT document (root name "").
+#[must_use]
+pub fn write(t: &Tag) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(type_id(t));
+    write_str(&mut out, "");
+    write_payload(&mut out, t);
+    out
+}
+
+/// Gzip-compressed NBT (`level.dat`).
+pub fn write_gzip(t: &Tag) -> std::io::Result<Vec<u8>> {
+    use std::io::Write as _;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(&write(t))?;
+    e.finish()
+}
+
+/// Build a compound from pairs.
+#[must_use]
+pub fn compound(v: Vec<(&str, Tag)>) -> Tag {
+    Tag::Compound(v.into_iter().map(|(k, t)| (k.to_owned(), t)).collect())
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn round_trip() {
+        let t = compound(vec![
+            ("a", Tag::Int(5)),
+            ("s", Tag::String("hé".into())),
+            ("l", Tag::List(vec![Tag::Long(1), Tag::Long(-2)])),
+            ("c", compound(vec![("x", Tag::Byte(1))])),
+            ("la", Tag::LongArray(vec![7, 8])),
+        ]);
+        let b = write(&t);
+        assert_eq!(parse(&b).unwrap(), t);
+    }
+}

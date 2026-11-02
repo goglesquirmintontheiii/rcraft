@@ -282,9 +282,18 @@ pub fn encode_chunk(c: &Chunk, map: &IdMap, data_version: u32) -> Vec<u8> {
     for &h in &c.height_surface {
         w.i16(h);
     }
-    // block entities, entities, scheduled ticks, post-processing (Phase 2+)
-    w.u32(0);
-    w.u32(0);
+    w.u32(c.block_entities.len() as u32);
+    for (pos, data) in &c.block_entities {
+        w.u32(*pos);
+        w.u32(data.len() as u32);
+        w.0.extend_from_slice(data);
+    }
+    w.u32(c.entities.len() as u32);
+    for data in &c.entities {
+        w.u32(data.len() as u32);
+        w.0.extend_from_slice(data);
+    }
+    // scheduled ticks, post-processing
     w.u32(0);
     w.u32(0);
     let raw = w.0;
@@ -337,6 +346,19 @@ pub fn decode_chunk(rec: &[u8], map: &IdMap) -> Result<Chunk> {
     }
     for h in &mut chunk.height_surface {
         *h = r.i16()?;
+    }
+    if r.p < raw.len() {
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            let pos = r.u32()?;
+            let len = r.u32()? as usize;
+            chunk.block_entities.push((pos, r.take(len)?.to_vec()));
+        }
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            let len = r.u32()? as usize;
+            chunk.entities.push(r.take(len)?.to_vec());
+        }
     }
     chunk.light_valid = flags & 1 != 0;
     chunk.dirty = false;
@@ -629,6 +651,21 @@ pub struct WorldMeta {
     /// Index ⇒ stable id used in region files.
     pub block_states: Vec<String>,
     pub biomes: Vec<String>,
+    #[serde(default)]
+    pub raining: bool,
+    #[serde(default)]
+    pub thundering: bool,
+    #[serde(default)]
+    pub rain_time: i64,
+    #[serde(default)]
+    pub thunder_time: i64,
+    #[serde(default)]
+    pub clear_weather_time: i64,
+    /// Game rules as strings (vanilla names, e.g. `doDaylightCycle`).
+    #[serde(default)]
+    pub rules: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub world_type: String,
 }
 
 impl WorldMeta {
@@ -768,6 +805,13 @@ mod tests {
             player: None,
             block_states: vec!["minecraft:air".into()],
             biomes: vec!["minecraft:plains".into()],
+            raining: false,
+            thundering: false,
+            rain_time: 0,
+            thunder_time: 0,
+            clear_weather_time: 0,
+            rules: Default::default(),
+            world_type: String::new(),
         };
         m.write(&p).unwrap();
         m.write(&p).unwrap();

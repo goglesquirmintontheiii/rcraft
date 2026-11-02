@@ -37,7 +37,8 @@ for rel in ["worldgen/biome", "worldgen/configured_carver", "worldgen/configured
             "worldgen/noise_settings", "worldgen/structure", "worldgen/structure_set",
             "worldgen/template_pool", "worldgen/processor_list",
             "dimension", "dimension_type", "tags/block", "tags/fluid", "tags/item",
-            "tags/worldgen/biome"]:
+            "tags/worldgen/biome", "tags/entity_type", "recipe", "loot_table/blocks",
+            "loot_table/entities", "loot_table/gameplay"]:
     copy_tree(rel, rel)
 
 # ---- blocks -------------------------------------------------------------
@@ -88,9 +89,29 @@ for b in sorted(blocks, key=lambda b: b["id"]):
 with open(os.path.join(out, "blocks.json"), "w") as f:
     json.dump({"blocks": out_blocks, "shapes": shapes["shapes"]}, f, separators=(",", ":"))
 
+# Item components from the data generator: durability, food, tool rules.
+comps = json.load(open(os.path.join(summary, "item_components", "data.min.json")))
+def item_entry(i):
+    c = comps.get("minecraft:" + i["name"]) or comps.get(i["name"]) or {}
+    e = {"name": i["name"], "stack": i["stackSize"]}
+    if "minecraft:max_damage" in c:
+        e["durability"] = c["minecraft:max_damage"]
+    if "minecraft:food" in c:
+        f = c["minecraft:food"]
+        e["food"] = [f.get("nutrition", 0), f.get("saturation", 0.0)]
+    if "minecraft:tool" in c:
+        e["tool"] = [[r["blocks"] if isinstance(r["blocks"], str) else ",".join(r["blocks"]), r.get("speed"), r.get("correct_for_drops")] for r in c["minecraft:tool"]["rules"]]
+    for m in c.get("minecraft:attribute_modifiers", {}).get("modifiers", []):
+        if m["type"].endswith("attack_damage"):
+            e["attack"] = m["amount"]
+    return e
 with open(os.path.join(out, "items.json"), "w") as f:
-    json.dump([{"name": i["name"], "stack": i["stackSize"]} for i in sorted(items, key=lambda i: i["id"])],
-              f, separators=(",", ":"))
+    json.dump([item_entry(i) for i in sorted(items, key=lambda i: i["id"])], f, separators=(",", ":"))
+
+ents = json.load(open(os.path.join(mcd, "1.20.5", "entities.json")))
+with open(os.path.join(out, "entities.json"), "w") as f:
+    json.dump([{"name": e["name"], "width": e["width"], "height": e["height"], "kind": e["type"]}
+               for e in ents], f, separators=(",", ":"))
 
 tints = json.load(open(os.path.join(mcd, "1.21.1", "tints.json")))
 with open(os.path.join(out, "tints.json"), "w") as f:

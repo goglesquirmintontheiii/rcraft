@@ -71,17 +71,38 @@ pub fn run(req: &Request) -> Result<()> {
     let scene = req.scene.as_str();
     let world_scene = matches!(
         scene,
-        "world" | "f3" | "inventory" | "creative" | "pause" | "chat"
+        "world"
+            | "f3"
+            | "inventory"
+            | "creative"
+            | "pause"
+            | "chat"
+            | "survival"
+            | "crafting"
+            | "furnace"
+            | "mobs"
+            | "hand"
+            | "rain"
     );
     if world_scene {
-        let existing = rc_world::rcw::WorldMeta::read(
-            &crate::engine::world_dir(&req.game_dir).join("world.rcw"),
-        )
-        .is_ok_and(|m| m.seed == req.seed);
+        let dir = "Screenshot World";
+        let path = crate::worlds::world_path(&req.game_dir, dir);
+        let existing = rc_world::rcw::WorldMeta::read(&path.join("world.rcw"))
+            .is_ok_and(|m| m.seed == req.seed);
         if existing {
-            engine.open_world(None)?;
+            engine.open_world(Some(dir), None)?;
         } else {
-            engine.open_world(Some(("Screenshot World".into(), req.seed, true)))?;
+            let _ = std::fs::remove_dir_all(&path);
+            engine.open_world(
+                None,
+                Some(crate::engine::NewWorld {
+                    name: dir.into(),
+                    seed: req.seed,
+                    mode: 1,
+                    difficulty: 2,
+                    rules: Vec::new(),
+                }),
+            )?;
         }
         let g = engine.game.as_mut().context("world")?;
         g.player.mode = GameMode::Creative;
@@ -152,20 +173,169 @@ pub fn run(req: &Request) -> Result<()> {
                 {
                     if let Some(id) = it.id(n) {
                         g.inv.slots[i] = Some(crate::items::Stack {
+                            damage: 0,
                             item: id,
                             count: if i == 0 { 64 } else { 1 + i as u8 * 7 },
                         });
                     }
                 }
                 engine.screens.push(Screen::Creative {
+                    tab: crate::containers::CreativeTab::Inventory,
                     scroll: 0.0,
                     search: String::new(),
                 });
             }
             "creative" => engine.screens.push(Screen::Creative {
+                tab: crate::containers::CreativeTab::Items(crate::items::Tab::Building),
                 scroll: 0.0,
                 search: String::new(),
             }),
+            "survival" | "crafting" | "furnace" | "hand" => {
+                let it = crate::items::items();
+                let g = engine.game.as_mut().expect("game");
+                g.player.mode = GameMode::Survival;
+                g.player.flying = scene == "hand";
+                g.inv.slots.iter_mut().for_each(|s| *s = None);
+                for (i, (n, c)) in [
+                    ("oak_planks", 12u8),
+                    ("stick", 8),
+                    ("cobblestone", 30),
+                    ("iron_pickaxe", 1),
+                    ("bread", 5),
+                    ("coal", 9),
+                    ("raw_iron", 6),
+                    ("oak_log", 3),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    if let Some(id) = it.id(n) {
+                        g.inv.slots[i] = Some(crate::items::Stack {
+                            damage: if *n == "iron_pickaxe" { 90 } else { 0 },
+                            item: id,
+                            count: *c,
+                        });
+                    }
+                }
+                let p = rc_core::BlockPos::new(
+                    g.player.pos[0].floor() as i32 + 2,
+                    g.player.pos[1].floor() as i32,
+                    g.player.pos[2].floor() as i32,
+                );
+                match scene {
+                    "crafting" => {
+                        g.craft[0] = Some(crate::items::Stack::new(
+                            it.id("oak_planks").unwrap_or(0),
+                            1,
+                        ));
+                        g.craft[1] = Some(crate::items::Stack::new(
+                            it.id("oak_planks").unwrap_or(0),
+                            1,
+                        ));
+                        g.craft[3] = Some(crate::items::Stack::new(
+                            it.id("oak_planks").unwrap_or(0),
+                            1,
+                        ));
+                        g.craft[4] = Some(crate::items::Stack::new(
+                            it.id("oak_planks").unwrap_or(0),
+                            1,
+                        ));
+                        g.container = Some(crate::game::Container::Crafting { pos: p });
+                        engine.screens.push(Screen::Inventory);
+                    }
+                    "furnace" => {
+                        let st = rc_data::blocks().default_state("furnace");
+                        g.set_block(p, st);
+                        if let Some(crate::blockentity::BlockEntity::Furnace {
+                            slots,
+                            burn,
+                            burn_total,
+                            cook,
+                            cook_total,
+                            ..
+                        }) = g.world.block_entities.get_mut(&p)
+                        {
+                            slots[0] =
+                                Some(crate::items::Stack::new(it.id("raw_iron").unwrap_or(0), 4));
+                            slots[1] =
+                                Some(crate::items::Stack::new(it.id("coal").unwrap_or(0), 3));
+                            slots[2] = Some(crate::items::Stack::new(
+                                it.id("iron_ingot").unwrap_or(0),
+                                2,
+                            ));
+                            (*burn, *burn_total, *cook, *cook_total) = (900, 1600, 120, 200);
+                        }
+                        g.container = Some(crate::game::Container::Furnace { pos: p });
+                        engine.screens.push(Screen::Inventory);
+                    }
+                    "survival" => engine.screens.push(Screen::Inventory),
+                    _ => {
+                        g.inv.selected = std::env::var("RC_SLOT")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(3)
+                    }
+                }
+            }
+            "mobs" | "rain" => {
+                let g = engine.game.as_mut().expect("game");
+                let (yaw, pos) = (g.player.yaw, g.player.pos);
+                let (sy, cy) = f64::from(yaw).to_radians().sin_cos();
+                let kinds = crate::mobs::MobKind::ALL;
+                for (i, k) in kinds.iter().enumerate() {
+                    for baby in [false, true] {
+                        let side = (i as f64 - 1.5) * 2.2 + if baby { 0.9 } else { 0.0 };
+                        let fwd = 6.0 + if baby { 1.5 } else { 0.0 };
+                        let x = pos[0] - sy * fwd - cy * side;
+                        let z = pos[2] + cy * fwd - sy * side;
+                        let y = g
+                            .world
+                            .surface_y(x.floor() as i32, z.floor() as i32)
+                            .map_or(pos[1], |y| f64::from(y) + 1.0);
+                        let mut e = crate::entity::Entity::new(
+                            crate::entity::Kind::Mob(Box::new(crate::mobs::Mob::new(*k, baby))),
+                            [x, y, z],
+                        );
+                        e.yaw = yaw + 180.0 + i as f32 * 25.0;
+                        e.prev_yaw = e.yaw;
+                        e.prev_pos = e.pos;
+                        if let crate::entity::Kind::Mob(m) = &mut e.kind {
+                            m.head_yaw = e.yaw;
+                        }
+                        g.entities.spawn(e);
+                    }
+                }
+                let it = crate::items::items();
+                for (j, n) in ["diamond", "oak_log", "apple", "torch"].iter().enumerate() {
+                    let x = pos[0] - sy * 4.0 - cy * (j as f64 - 1.5);
+                    let z = pos[2] + cy * 4.0 - sy * (j as f64 - 1.5);
+                    let y = g
+                        .world
+                        .surface_y(x.floor() as i32, z.floor() as i32)
+                        .map_or(pos[1], |y| f64::from(y) + 1.0);
+                    let mut e = crate::entity::Entity::item(
+                        crate::items::Stack::new(it.id(n).unwrap_or(0), 1),
+                        [x, y, z],
+                        40,
+                    );
+                    e.prev_pos = e.pos;
+                    g.entities.spawn(e);
+                }
+                if scene == "rain" {
+                    g.rain = 1.0;
+                    g.prev_rain = 1.0;
+                    g.world.meta.raining = true;
+                }
+                let p = rc_core::BlockPos::new(
+                    (pos[0] - sy * 3.0).floor() as i32,
+                    pos[1].floor() as i32 - 1,
+                    (pos[2] + cy * 3.0).floor() as i32,
+                );
+                let st = g.world.get_block(p);
+                let uv = crate::PARTICLE_SPRITES
+                    .with(|s| s.borrow().get(st.0 as usize).copied().unwrap_or([0.0; 4]));
+                g.particles.block_break(p, uv, [1.0; 3]);
+            }
             "pause" => engine.screens.push(Screen::Pause),
             "chat" => {
                 let g = engine.game.as_mut().expect("game");
@@ -177,7 +347,10 @@ pub fn run(req: &Request) -> Result<()> {
             }
             _ => {}
         }
-        if scene == "inventory" || scene == "creative" {
+        if matches!(
+            scene,
+            "inventory" | "creative" | "survival" | "crafting" | "furnace"
+        ) {
             engine.input.mouse_px = (w as f32 * 0.42, h as f32 * 0.42);
         }
     } else {
@@ -185,13 +358,25 @@ pub fn run(req: &Request) -> Result<()> {
             "options" => vec![Screen::Title, Screen::Options],
             "video" => vec![Screen::Title, Screen::Video],
             "performance" => vec![Screen::Title, Screen::Performance],
-            "select" => vec![Screen::Title, Screen::SelectWorld],
+            "select" => vec![
+                Screen::Title,
+                Screen::SelectWorld {
+                    selected: None,
+                    scroll: 0.0,
+                },
+            ],
             "create" => vec![
                 Screen::Title,
                 Screen::CreateWorld {
                     name: "New World".into(),
                     seed: String::new(),
-                    creative: false,
+                    mode: 0,
+                    difficulty: 2,
+                    more: false,
+                    rules: crate::worlds::DEFAULT_RULES
+                        .iter()
+                        .map(|(k, v)| ((*k).to_owned(), *v))
+                        .collect(),
                 },
             ],
             _ => vec![Screen::Title],

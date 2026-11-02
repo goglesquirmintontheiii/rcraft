@@ -180,3 +180,130 @@ impl AnvilChunk {
             .map(String::as_str)
     }
 }
+
+fn pack(indices: &[u16], bits: usize) -> Vec<i64> {
+    if bits == 0 {
+        return Vec::new();
+    }
+    let per = 64 / bits;
+    let mut out = vec![0i64; indices.len().div_ceil(per)];
+    for (i, &v) in indices.iter().enumerate() {
+        out[i / per] |= (i64::from(v) & ((1i64 << bits) - 1)) << ((i % per) * bits);
+    }
+    out
+}
+
+fn state_tag(s: &AnvilState) -> Tag {
+    let mut v = vec![("Name".to_owned(), Tag::String(s.name.clone()))];
+    if !s.props.is_empty() {
+        v.push((
+            "Properties".to_owned(),
+            Tag::Compound(
+                s.props
+                    .iter()
+                    .map(|(k, val)| (k.clone(), Tag::String(val.clone())))
+                    .collect(),
+            ),
+        ));
+    }
+    Tag::Compound(v)
+}
+
+impl AnvilChunk {
+    /// Encode as 1.21.1 chunk NBT (status full, light to be recomputed).
+    #[must_use]
+    pub fn to_nbt(&self) -> Tag {
+        let sections: Vec<Tag> = self
+            .sections
+            .iter()
+            .map(|s| {
+                let bits = bits_for(s.block_palette.len(), 4);
+                let mut bs = vec![(
+                    "palette".to_owned(),
+                    Tag::List(s.block_palette.iter().map(state_tag).collect()),
+                )];
+                if bits > 0 {
+                    bs.push(("data".to_owned(), Tag::LongArray(pack(&s.blocks, bits))));
+                }
+                let bbits = bits_for(s.biome_palette.len(), 1);
+                let mut bio = vec![(
+                    "palette".to_owned(),
+                    Tag::List(
+                        s.biome_palette
+                            .iter()
+                            .map(|b| Tag::String(b.clone()))
+                            .collect(),
+                    ),
+                )];
+                if bbits > 0 {
+                    bio.push(("data".to_owned(), Tag::LongArray(pack(&s.biomes, bbits))));
+                }
+                Tag::Compound(vec![
+                    ("Y".to_owned(), Tag::Byte(s.y)),
+                    ("block_states".to_owned(), Tag::Compound(bs)),
+                    ("biomes".to_owned(), Tag::Compound(bio)),
+                ])
+            })
+            .collect();
+        Tag::Compound(vec![
+            ("DataVersion".to_owned(), Tag::Int(self.data_version)),
+            ("xPos".to_owned(), Tag::Int(self.x)),
+            ("zPos".to_owned(), Tag::Int(self.z)),
+            ("yPos".to_owned(), Tag::Int(-4)),
+            ("Status".to_owned(), Tag::String(self.status.clone())),
+            ("LastUpdate".to_owned(), Tag::Long(0)),
+            ("InhabitedTime".to_owned(), Tag::Long(0)),
+            ("isLightOn".to_owned(), Tag::Byte(0)),
+            ("sections".to_owned(), Tag::List(sections)),
+            ("block_entities".to_owned(), Tag::List(Vec::new())),
+            ("Heightmaps".to_owned(), Tag::Compound(Vec::new())),
+            ("fluid_ticks".to_owned(), Tag::List(Vec::new())),
+            ("block_ticks".to_owned(), Tag::List(Vec::new())),
+            ("PostProcessing".to_owned(), Tag::List(Vec::new())),
+            (
+                "structures".to_owned(),
+                Tag::Compound(vec![
+                    ("References".to_owned(), Tag::Compound(Vec::new())),
+                    ("starts".to_owned(), Tag::Compound(Vec::new())),
+                ]),
+            ),
+        ])
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_round_trip() {
+        let pal = vec![
+            AnvilState {
+                name: "minecraft:air".into(),
+                props: vec![],
+            },
+            AnvilState {
+                name: "minecraft:oak_log".into(),
+                props: vec![("axis".into(), "y".into())],
+            },
+        ];
+        let blocks: Vec<u16> = (0..4096).map(|i| (i % 3 == 0) as u16).collect();
+        let c = AnvilChunk {
+            x: 3,
+            z: -2,
+            status: "minecraft:full".into(),
+            data_version: 3955,
+            sections: vec![AnvilSection {
+                y: 4,
+                block_palette: pal,
+                blocks: blocks.clone(),
+                biome_palette: vec!["minecraft:plains".into()],
+                biomes: vec![0; 64],
+            }],
+            heightmaps: vec![],
+        };
+        let back = AnvilChunk::from_nbt(&c.to_nbt()).unwrap();
+        assert_eq!(back.sections[0].blocks, blocks);
+        assert_eq!(back.block(0, 64, 0).unwrap().name, "minecraft:oak_log");
+    }
+}

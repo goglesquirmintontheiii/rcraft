@@ -11,12 +11,36 @@ use crate::player::GameMode;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Screen {
     Title,
-    SelectWorld,
+    SelectWorld {
+        selected: Option<usize>,
+        scroll: f32,
+    },
     CreateWorld {
         name: String,
         seed: String,
-        creative: bool,
+        mode: u8,
+        difficulty: u8,
+        more: bool,
+        rules: Vec<(String, bool)>,
     },
+    EditWorld {
+        dir: String,
+        name: String,
+    },
+    ConfirmDelete {
+        dir: String,
+        name: String,
+    },
+    ImportWorld {
+        selected: Option<usize>,
+        scroll: f32,
+        path: String,
+    },
+    Message {
+        title: String,
+        text: String,
+    },
+    Sounds,
     Options,
     Video,
     Performance,
@@ -30,6 +54,7 @@ pub enum Screen {
     },
     Inventory,
     Creative {
+        tab: crate::containers::CreativeTab,
         scroll: f32,
         search: String,
     },
@@ -42,12 +67,20 @@ pub enum Action {
     Pop,
     /// Close every screen (back to the game).
     CloseAll,
-    PlayWorld,
+    PlayWorld(String),
     CreateWorld {
         name: String,
         seed: i64,
-        creative: bool,
+        mode: u8,
+        difficulty: u8,
+        rules: Vec<(String, bool)>,
     },
+    RenameWorld(String, String),
+    DeleteWorld(String),
+    BackupWorld(String),
+    ImportJava(String),
+    ExportJava(String),
+    VolumesChanged,
     SaveAndQuit,
     Quit,
     Respawn,
@@ -58,15 +91,19 @@ pub enum Action {
         reload_assets: bool,
     },
     ToggleFullscreen,
+    /// Open the game directory in the system file manager.
+    OpenDataFolder,
 }
 
 /// Info about the single world slot for the world list.
 #[derive(Clone, Debug)]
 pub struct WorldSummary {
+    pub dir: String,
     pub name: String,
     pub seed: i64,
     pub last_played: String,
     pub mode: String,
+    pub last_played_ms: u64,
 }
 
 /// Frame statistics shown on the debug screen.
@@ -90,7 +127,10 @@ pub struct Ctx<'a> {
     pub opts: &'a mut Options,
     pub gfx: &'a Gfx,
     pub game: Option<&'a mut Game>,
-    pub world: Option<WorldSummary>,
+    pub worlds: Vec<WorldSummary>,
+    /// Java worlds found in the player's `.minecraft/saves`.
+    pub java_worlds: Vec<(String, std::path::PathBuf)>,
+    pub audio: Option<&'a rc_audio::Audio>,
     pub update: rc_update::Status,
     pub stats: &'a Stats,
     pub f3: bool,
@@ -147,145 +187,42 @@ impl Screen {
         let in_world = cx.game.is_some();
         match self {
             Screen::Title => title(ui, cx, &mut out),
-            Screen::SelectWorld => {
-                ui.background(false);
-                header(ui, "Select World");
-                let (w, h) = (ui.w, ui.h);
-                ui.list_background(32.0, h - 64.0, false);
-                match &cx.world {
-                    Some(s) => {
-                        let (x, y) = (w / 2.0 - 110.0, 40.0);
-                        let hover = ui.hover(x, y, 220.0, 36.0);
-                        ui.fill(
-                            x - 2.0,
-                            y - 2.0,
-                            224.0,
-                            40.0,
-                            if hover {
-                                [1.0, 1.0, 1.0, 0.6]
-                            } else {
-                                [0.5, 0.5, 0.5, 0.5]
-                            },
-                        );
-                        ui.fill(x - 1.0, y - 1.0, 222.0, 38.0, [0.0, 0.0, 0.0, 1.0]);
-                        ui.text(&s.name, x + 4.0, y + 2.0, WHITE);
-                        ui.text(
-                            &format!("{} ({})", s.last_played, s.mode),
-                            x + 4.0,
-                            y + 13.0,
-                            GRAY,
-                        );
-                        ui.text(&format!("Seed: {}", s.seed), x + 4.0, y + 24.0, GRAY);
-                        if hover && ui.input.pressed {
-                            out.push(Action::PlayWorld);
-                        }
-                    }
-                    None => {
-                        ui.text_centered(
-                            "No world yet. Create one to start playing.",
-                            w / 2.0,
-                            60.0,
-                            GRAY,
-                        );
-                    }
-                }
-                let by = h - 52.0;
-                if ui.button(
-                    "Play Selected World",
-                    w / 2.0 - 154.0,
-                    by,
-                    150.0,
-                    20.0,
-                    cx.world.is_some(),
-                ) {
-                    out.push(Action::PlayWorld);
-                }
-                if ui.button(
-                    "Create New World",
-                    w / 2.0 + 4.0,
-                    by,
-                    150.0,
-                    20.0,
-                    cx.world.is_none(),
-                ) {
-                    out.push(Action::Push(Screen::CreateWorld {
-                        name: "New World".into(),
-                        seed: String::new(),
-                        creative: false,
-                    }));
-                }
-                if ui.button("Cancel", w / 2.0 + 4.0, by + 24.0, 150.0, 20.0, true)
-                    || ui.input.key(Key::Escape)
-                {
-                    out.push(Action::Pop);
-                }
-                if cx.world.is_some() {
-                    ui.text_centered(
-                        "This version supports one world (more in v0.2).",
-                        w / 2.0,
-                        by + 30.0,
-                        GRAY,
-                    );
-                }
+            Screen::SelectWorld { selected, scroll } => {
+                crate::worlds::select(ui, cx, selected, scroll, &mut out)
             }
             Screen::CreateWorld {
                 name,
                 seed,
-                creative,
+                mode,
+                difficulty,
+                more,
+                rules,
             } => {
-                ui.background(false);
-                header(ui, "Create New World");
-                let w = ui.w;
-                ui.text("World Name", w / 2.0 - 100.0, 47.0, GRAY);
-                ui.text_field(
-                    "world-name",
-                    w / 2.0 - 100.0,
-                    60.0,
-                    200.0,
-                    20.0,
-                    name,
-                    32,
-                    "",
-                );
-                ui.text("Seed for the world generator", w / 2.0 - 100.0, 87.0, GRAY);
-                ui.text_field(
-                    "world-seed",
-                    w / 2.0 - 100.0,
-                    100.0,
-                    200.0,
-                    20.0,
-                    seed,
-                    32,
-                    "Leave blank for a random seed",
-                );
-                let label = format!(
-                    "Game Mode: {}",
-                    if *creative { "Creative" } else { "Survival" }
-                );
-                if ui.button(&label, w / 2.0 - 100.0, 130.0, 200.0, 20.0, true) {
-                    *creative = !*creative;
+                crate::worlds::create(ui, name, seed, mode, difficulty, more, rules, &mut out);
+            }
+            Screen::EditWorld { dir, name } => crate::worlds::edit(ui, dir, name, &mut out),
+            Screen::ConfirmDelete { dir, name } => {
+                crate::worlds::confirm_delete(ui, dir, name, &mut out)
+            }
+            Screen::ImportWorld {
+                selected,
+                scroll,
+                path,
+            } => crate::worlds::import(ui, cx, selected, scroll, path, &mut out),
+            Screen::Message { title, text } => {
+                ui.background(in_world);
+                let (w, h) = (ui.w, ui.h);
+                ui.text_centered(title, w / 2.0, h / 2.0 - 40.0, WHITE);
+                for (i, l) in ui.font.wrap(text, w - 40.0).iter().enumerate() {
+                    ui.text_centered(l, w / 2.0, h / 2.0 - 20.0 + i as f32 * 10.0, GRAY);
                 }
-                let h = ui.h;
-                if ui.button(
-                    "Create New World",
-                    w / 2.0 - 155.0,
-                    h - 28.0,
-                    150.0,
-                    20.0,
-                    !name.trim().is_empty(),
-                ) {
-                    out.push(Action::CreateWorld {
-                        name: name.trim().to_owned(),
-                        seed: parse_seed(seed),
-                        creative: *creative,
-                    });
-                }
-                if ui.button("Cancel", w / 2.0 + 5.0, h - 28.0, 150.0, 20.0, true)
+                if ui.button("Done", w / 2.0 - 100.0, h / 2.0 + 30.0, 200.0, 20.0, true)
                     || ui.input.key(Key::Escape)
                 {
                     out.push(Action::Pop);
                 }
             }
+            Screen::Sounds => crate::worlds::sounds(ui, cx, in_world, &mut out),
             Screen::Options => {
                 ui.background(in_world);
                 header(ui, "Options");
@@ -299,23 +236,34 @@ impl Screen {
                 if ui.slider("fov", &label, w / 2.0 - 155.0, 32.0, 150.0, 20.0, &mut fov) {
                     cx.opts.fov = (30.0 + fov * 80.0).round();
                 }
-                let diff = cx
-                    .game
-                    .as_ref()
-                    .map_or("Normal".to_owned(), |_| "Normal".to_owned());
-                ui.button(
+                let enabled = cx.game.is_some();
+                let diff = cx.game.as_ref().map_or("Normal".to_owned(), |g| {
+                    let n = g.difficulty.name();
+                    n[..1].to_uppercase() + &n[1..]
+                });
+                if ui.button(
                     &format!("Difficulty: {diff}"),
                     w / 2.0 + 5.0,
                     32.0,
                     150.0,
                     20.0,
-                    false,
-                );
+                    enabled,
+                ) && let Some(g) = cx.game.as_mut()
+                {
+                    use crate::game::Difficulty as D;
+                    g.difficulty = match g.difficulty {
+                        D::Peaceful => D::Easy,
+                        D::Easy => D::Normal,
+                        D::Normal => D::Hard,
+                        D::Hard => D::Peaceful,
+                    };
+                }
                 let items = [
                     ("Video Settings...", Screen::Video),
                     ("Performance...", Screen::Performance),
                     ("Controls...", Screen::Controls),
                     ("Updates...", Screen::Updates),
+                    ("Music & Sounds...", Screen::Sounds),
                 ];
                 for (i, (l, s)) in items.into_iter().enumerate() {
                     let (x, y) = slot(ui, i + 2);
@@ -323,9 +271,9 @@ impl Screen {
                         out.push(Action::Push(s));
                     }
                 }
-                let (x, y) = slot(ui, 6);
-                ui.button("Resource Packs... (v0.3)", x, y + 24.0, 150.0, 20.0, false);
                 let (x, y) = slot(ui, 7);
+                ui.button("Resource Packs... (v0.3)", x, y + 24.0, 150.0, 20.0, false);
+                let (x, y) = slot(ui, 8);
                 ui.button("Language... (English)", x, y + 24.0, 150.0, 20.0, false);
                 done_button(ui, &mut out);
             }
@@ -531,7 +479,73 @@ impl Screen {
                 }
                 ui.fill(2.0, h - 14.0, w - 4.0, 12.0, [0.0, 0.0, 0.0, 0.5]);
                 ui.input.focus = Some(rc_ui::id("chat"));
+                // Command suggestions (Tab completes, Up/Down choose).
+                let sel_key = rc_ui::id("chat-suggest");
+                let (sugg, hint) = match text.strip_prefix('/') {
+                    Some(cmd) => crate::commands::suggest(cmd),
+                    None => (Vec::new(), String::new()),
+                };
+                let mut sel = ui.input.active.filter(|_| false).map_or(0, |_| 0);
+                if let Some(v) = CHAT_SEL.with(|c| c.get().filter(|x| x.0 == sel_key).map(|x| x.1))
+                {
+                    sel = v;
+                }
+                if !sugg.is_empty() {
+                    sel = sel.min(sugg.len() - 1);
+                    if ui.input.key(Key::Up) {
+                        sel = (sel + sugg.len() - 1) % sugg.len();
+                    }
+                    if ui.input.key(Key::Down) {
+                        sel = (sel + 1) % sugg.len();
+                    }
+                    if ui.input.key(Key::Tab) {
+                        let mut parts: Vec<&str> = text.split(' ').collect();
+                        parts.pop();
+                        let mut line = parts.join(" ");
+                        if !line.is_empty() {
+                            line.push(' ');
+                        }
+                        let pick = &sugg[sel];
+                        *text = format!("{}{}{pick}", if line.is_empty() { "/" } else { "" }, line);
+                        if !text.starts_with('/') {
+                            text.insert(0, '/');
+                        }
+                        text.push(' ');
+                        ui.input.caret = text.chars().count();
+                        sel = 0;
+                    }
+                }
+                CHAT_SEL.with(|c| c.set(Some((sel_key, sel))));
                 let enter = ui.text_field("chat", 2.0, h - 14.0, w - 4.0, 12.0, text, 256, "");
+                let typed_w = ui.font.width(text);
+                if !hint.is_empty() && text.ends_with(' ') {
+                    ui.text_plain(&hint, 6.0 + typed_w, h - 12.0, [0.5, 0.5, 0.5, 1.0]);
+                }
+                if !sugg.is_empty() && !text.ends_with(' ')
+                    || !sugg.is_empty() && text.ends_with(' ')
+                {
+                    let n = sugg.len().min(10);
+                    let start = sel.saturating_sub(9);
+                    let bw = sugg
+                        .iter()
+                        .skip(start)
+                        .take(n)
+                        .map(|x| ui.font.width(x))
+                        .fold(0.0, f32::max)
+                        + 4.0;
+                    let cur_start = text.rfind(' ').map_or(1, |i| i + 1);
+                    let bx = 4.0 + ui.font.width(&text[..cur_start.min(text.len())]);
+                    for (k, sgt) in sugg.iter().skip(start).take(n).enumerate() {
+                        let y = h - 16.0 - (n - k) as f32 * 12.0;
+                        ui.fill(bx, y, bw, 12.0, [0.0, 0.0, 0.0, 0.8]);
+                        let c = if start + k == sel {
+                            [1.0, 1.0, 0.0, 1.0]
+                        } else {
+                            [0.67, 0.67, 0.67, 1.0]
+                        };
+                        ui.text_plain(sgt, bx + 2.0, y + 2.0, c);
+                    }
+                }
                 if enter {
                     if let Some(g) = cx.game.as_mut() {
                         g.submit_chat(text);
@@ -543,12 +557,16 @@ impl Screen {
             }
             Screen::Inventory => {
                 if let Some(g) = cx.game.as_mut() {
-                    survival_inventory(ui, cx.gfx, g, &mut out);
+                    crate::containers::container(ui, cx.gfx, g, &mut out);
                 }
             }
-            Screen::Creative { scroll, search } => {
+            Screen::Creative {
+                tab,
+                scroll,
+                search,
+            } => {
                 if let Some(g) = cx.game.as_mut() {
-                    creative_inventory(ui, cx.gfx, g, scroll, search, &mut out);
+                    crate::containers::creative(ui, cx.gfx, g, tab, scroll, search, &mut out);
                 }
             }
         }
@@ -556,7 +574,11 @@ impl Screen {
     }
 }
 
-fn parse_seed(s: &str) -> i64 {
+thread_local! {
+    static CHAT_SEL: std::cell::Cell<Option<(u64, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn parse_seed(s: &str) -> i64 {
     let s = s.trim();
     if s.is_empty() {
         return rand::random::<i64>();
@@ -614,14 +636,17 @@ fn title(ui: &mut Ui<'_>, cx: &mut Ctx<'_>, out: &mut Vec<Action>) {
         ui.dl,
         splash,
         (w / 2.0 + tw / 2.0 - sw * pulse / 2.0 - 10.0) / pulse,
-        (30.0 + 9.0 * k - 4.0) / pulse,
+        (30.0 + 7.0 * k) / pulse,
         s * pulse,
         [1.0, 1.0, 0.0, 1.0],
         true,
     );
     let y = h / 4.0 + 48.0;
     if ui.button("Singleplayer", w / 2.0 - 100.0, y, 200.0, 20.0, true) {
-        out.push(Action::Push(Screen::SelectWorld));
+        out.push(Action::Push(Screen::SelectWorld {
+            selected: None,
+            scroll: 0.0,
+        }));
     }
     ui.button(
         "Multiplayer (v0.4)",
@@ -664,8 +689,10 @@ fn title(ui: &mut Ui<'_>, cx: &mut Ctx<'_>, out: &mut Vec<Action>) {
     }
     if !cx.gfx.assets.is_vanilla() {
         let msg = "No Minecraft install found: using the built-in textures. Install Minecraft Java 1.21.1 for the vanilla look.";
+        // Between the subtitle and the buttons, so it never covers them.
+        let top = 30.0 + 8.0 * k + 18.0;
         for (i, line) in ui.font.wrap(msg, w - 20.0).iter().enumerate() {
-            ui.text_centered(line, w / 2.0, h - 34.0 + i as f32 * 10.0, GRAY);
+            ui.text_centered(line, w / 2.0, top + i as f32 * 10.0, GRAY);
         }
     }
 }
@@ -693,17 +720,26 @@ fn video(ui: &mut Ui<'_>, cx: &mut Ctx<'_>, out: &mut Vec<Action>, in_world: boo
         reload_world = true;
     }
     let (x, y) = slot(ui, 1);
-    let mut rd = (o.render_distance - 2) as f32 / 30.0;
+    let span = (crate::options::MAX_RENDER_DISTANCE - 2) as f32;
+    let mut rd = (o.render_distance - 2) as f32 / span;
     if ui.slider(
         "rd",
-        &format!("Render Distance: {} chunks", o.render_distance),
+        &if o.effective_render_distance() < o.render_distance {
+            format!(
+                "Render Distance: {} ({} by memory)",
+                o.render_distance,
+                o.effective_render_distance()
+            )
+        } else {
+            format!("Render Distance: {} chunks", o.render_distance)
+        },
         x,
         y,
         150.0,
         20.0,
         &mut rd,
     ) {
-        o.render_distance = 2 + (rd * 30.0).round() as i32;
+        o.render_distance = 2 + (rd * span).round() as i32;
         changed = true;
     }
     let (x, y) = slot(ui, 2);
@@ -875,6 +911,17 @@ fn performance(ui: &mut Ui<'_>, cx: &mut Ctx<'_>, out: &mut Vec<Action>, in_worl
     for (i, l) in info.iter().enumerate() {
         ui.text_centered(l, w / 2.0, 92.0 + i as f32 * 11.0, GRAY);
     }
+    let h = ui.h;
+    if ui.button(
+        "Open Data Folder",
+        w / 2.0 - 100.0,
+        h - 51.0,
+        200.0,
+        20.0,
+        true,
+    ) {
+        out.push(Action::OpenDataFolder);
+    }
     if changed {
         out.push(Action::OptionsChanged {
             reload_world: false,
@@ -911,9 +958,21 @@ pub fn draw_chat(ui: &mut Ui<'_>, g: &Game, open: bool) {
     }
 }
 
-fn draw_stack(ui: &mut Ui<'_>, gfx: &Gfx, s: Stack, x: f32, y: f32) {
+pub(crate) fn draw_stack(ui: &mut Ui<'_>, gfx: &Gfx, s: Stack, x: f32, y: f32) {
     let scale = ui.scale;
     gfx.draw_item(ui.dl, scale, s.item, x, y, 16.0);
+    let max = crate::items::items()
+        .durability
+        .get(s.item as usize)
+        .copied()
+        .unwrap_or(0);
+    if s.damage > 0 && max > 0 {
+        let f = 1.0 - f32::from(s.damage) / f32::from(max);
+        let w = (13.0 * f).round();
+        ui.fill(x + 2.0, y + 13.0, 13.0, 2.0, [0.0, 0.0, 0.0, 1.0]);
+        let c = [(1.0 - f).min(1.0) * 1.0, f.min(1.0), 0.0, 1.0];
+        ui.fill(x + 2.0, y + 13.0, w, 1.0, c);
+    }
     if s.count > 1 {
         let t = s.count.to_string();
         let tw = ui.font.width(&t);
@@ -1238,263 +1297,3 @@ fn debug_screen(ui: &mut Ui<'_>, cx: &Ctx<'_>, g: &Game) {
 // ---------------------------------------------------------------------------
 // Containers
 // ---------------------------------------------------------------------------
-
-fn slot_box(ui: &mut Ui<'_>, x: f32, y: f32) {
-    ui.fill(x - 1.0, y - 1.0, 18.0, 18.0, [0.22, 0.22, 0.22, 1.0]);
-    ui.fill(x, y, 17.0, 17.0, [1.0, 1.0, 1.0, 1.0]);
-    ui.fill(x, y, 16.0, 16.0, [0.55, 0.55, 0.55, 1.0]);
-}
-
-/// Draw one inventory slot; returns true when hovered.
-fn inv_slot(ui: &mut Ui<'_>, gfx: &Gfx, s: Option<Stack>, x: f32, y: f32, draw_box: bool) -> bool {
-    if draw_box {
-        slot_box(ui, x, y);
-    }
-    if let Some(s) = s {
-        draw_stack(ui, gfx, s, x, y);
-    }
-    let hover = ui.hover(x, y, 16.0, 16.0);
-    if hover {
-        ui.fill(x, y, 16.0, 16.0, [1.0, 1.0, 1.0, 0.5]);
-    }
-    hover
-}
-
-fn panel(
-    ui: &mut Ui<'_>,
-    sprite: Option<rc_ui::Sprite>,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    tex_size: (f32, f32),
-) {
-    match sprite {
-        Some(mut s) => {
-            s.uv = [0.0, 0.0, w / tex_size.0, h / tex_size.1];
-            s.border = 0.0;
-            ui.sprite(&s, x, y, w, h, WHITE);
-        }
-        None => {
-            ui.fill(x, y, w, h, [0.78, 0.78, 0.78, 1.0]);
-            ui.fill(x, y, w, 1.0, WHITE);
-            ui.fill(x, y + h - 1.0, w, 1.0, [0.33, 0.33, 0.33, 1.0]);
-        }
-    }
-}
-
-fn survival_inventory(ui: &mut Ui<'_>, gfx: &Gfx, g: &mut Game, out: &mut Vec<Action>) {
-    let (w, h) = (ui.w, ui.h);
-    ui.fill(0.0, 0.0, w, h, [0.06, 0.06, 0.06, 0.75]);
-    let (x0, y0) = ((w - 176.0) / 2.0, (h - 166.0) / 2.0);
-    let has_tex = gfx.theme.inventory.is_some();
-    panel(
-        ui,
-        gfx.theme.inventory,
-        x0,
-        y0,
-        176.0,
-        166.0,
-        (256.0, 256.0),
-    );
-    ui.text_plain("Crafting", x0 + 97.0, y0 + 8.0, [0.25, 0.25, 0.25, 1.0]);
-    let mut hovered = None;
-    for i in 0..36 {
-        let (sx, sy) = if i < 9 {
-            (x0 + 8.0 + i as f32 * 18.0, y0 + 142.0)
-        } else {
-            let k = i - 9;
-            (
-                x0 + 8.0 + (k % 9) as f32 * 18.0,
-                y0 + 84.0 + (k / 9) as f32 * 18.0,
-            )
-        };
-        if inv_slot(ui, gfx, g.inv.slots[i], sx, sy, !has_tex) {
-            hovered = Some(i);
-        }
-    }
-    if let Some(i) = hovered {
-        if ui.input.pressed {
-            g.inv.click(i, false);
-            ui.input.pressed = false;
-        } else if ui.input.right_pressed {
-            g.inv.click(i, true);
-        }
-        if g.inv.cursor.is_none()
-            && let Some(s) = g.inv.slots[i]
-        {
-            ui.tooltip(&[items().display_name(s.item)]);
-        }
-    }
-    cursor_stack(ui, gfx, g);
-    if ui.input.key(Key::Escape) {
-        if let Some(c) = g.inv.cursor.take() {
-            g.inv.add(c.item, c.count);
-        }
-        out.push(Action::CloseAll);
-    }
-}
-
-fn cursor_stack(ui: &mut Ui<'_>, gfx: &Gfx, g: &Game) {
-    if let Some(c) = g.inv.cursor {
-        let (mx, my) = ui.mouse();
-        draw_stack(ui, gfx, c, mx - 8.0, my - 8.0);
-    }
-}
-
-fn creative_inventory(
-    ui: &mut Ui<'_>,
-    gfx: &Gfx,
-    g: &mut Game,
-    scroll: &mut f32,
-    search: &mut String,
-    out: &mut Vec<Action>,
-) {
-    let (w, h) = (ui.w, ui.h);
-    ui.fill(0.0, 0.0, w, h, [0.06, 0.06, 0.06, 0.75]);
-    let (x0, y0) = ((w - 195.0) / 2.0, (h - 136.0) / 2.0);
-    let it = items();
-    let q = search.to_lowercase();
-    let list: Vec<u16> = it
-        .natural
-        .iter()
-        .copied()
-        .filter(|&i| {
-            q.is_empty()
-                || it.names[i as usize].replace('_', " ").contains(&q)
-                || it.display_name(i).to_lowercase().contains(&q)
-        })
-        .collect();
-    let rows = list.len().div_ceil(9);
-    let max_scroll = rows.saturating_sub(5) as f32;
-    if ui.input.scroll != 0.0 {
-        *scroll = (*scroll - ui.input.scroll.signum()).clamp(0.0, max_scroll);
-    }
-    let bg = if search.is_empty() {
-        gfx.theme.creative_items
-    } else {
-        gfx.theme.creative_search.or(gfx.theme.creative_items)
-    };
-    let has_tex = bg.is_some();
-    panel(ui, bg, x0, y0, 195.0, 136.0, (256.0, 256.0));
-    // Tab label.
-    if let Some(tab) = gfx.theme.creative_tab_top_selected.first() {
-        ui.sprite(tab, x0, y0 - 28.0, 26.0, 32.0, WHITE);
-    }
-    if let Some(stone) = it.id("grass_block") {
-        gfx.draw_item(ui.dl, ui.scale, stone, x0 + 5.0, y0 - 20.0, 16.0);
-    }
-    ui.text_plain(
-        if search.is_empty() {
-            "Natural Blocks"
-        } else {
-            "Search Items"
-        },
-        x0 + 8.0,
-        y0 + 6.0,
-        [0.25, 0.25, 0.25, 1.0],
-    );
-    // Search typed directly.
-    for c in ui.input.typed.chars() {
-        if !c.is_control() && search.len() < 32 && !(search.is_empty() && c == 'e') {
-            search.push(c);
-            *scroll = 0.0;
-        }
-    }
-    if ui.input.key(Key::Backspace) {
-        search.pop();
-    }
-    if !search.is_empty() {
-        ui.text_plain(search, x0 + 82.0, y0 + 6.0, WHITE);
-    }
-    let start = (*scroll as usize) * 9;
-    let mut hovered_palette = None;
-    for r in 0..5 {
-        for c in 0..9 {
-            let i = start + r * 9 + c;
-            let (sx, sy) = (x0 + 9.0 + c as f32 * 18.0, y0 + 18.0 + r as f32 * 18.0);
-            let s = list.get(i).map(|&item| Stack { item, count: 1 });
-            if inv_slot(ui, gfx, s, sx, sy, !has_tex) && s.is_some() {
-                hovered_palette = s;
-            }
-        }
-    }
-    let mut hovered_hotbar = None;
-    for i in 0..9 {
-        let (sx, sy) = (x0 + 9.0 + i as f32 * 18.0, y0 + 112.0);
-        if inv_slot(ui, gfx, g.inv.slots[i], sx, sy, !has_tex) {
-            hovered_hotbar = Some(i);
-        }
-    }
-    // Scrollbar.
-    let track = 112.0 - 17.0;
-    let sy = y0
-        + 18.0
-        + if max_scroll > 0.0 {
-            *scroll / max_scroll * track
-        } else {
-            0.0
-        };
-    match gfx.theme.scroller {
-        Some(s) => ui.sprite(&s, x0 + 175.0, sy, 12.0, 15.0, WHITE),
-        None => ui.fill(x0 + 175.0, sy, 12.0, 15.0, [0.8, 0.8, 0.8, 1.0]),
-    }
-    if ui.input.down && ui.hover(x0 + 174.0, y0 + 18.0, 14.0, 112.0) && max_scroll > 0.0 {
-        let (_, my) = ui.mouse();
-        *scroll = (((my - y0 - 18.0 - 7.0) / track) * max_scroll)
-            .round()
-            .clamp(0.0, max_scroll);
-    }
-    if let Some(s) = hovered_palette {
-        if ui.input.pressed {
-            ui.input.pressed = false;
-            if g.inv.cursor.is_some() {
-                g.inv.cursor = None;
-            } else if ui.input.shift {
-                g.inv.add(s.item, it.max_stack[s.item as usize]);
-            } else {
-                g.inv.cursor = Some(Stack {
-                    item: s.item,
-                    count: it.max_stack[s.item as usize],
-                });
-            }
-        } else if ui.input.right_pressed && g.inv.cursor.is_none() {
-            g.inv.cursor = Some(Stack {
-                item: s.item,
-                count: 1,
-            });
-        }
-        if g.inv.cursor.is_none() {
-            ui.tooltip(&[
-                it.display_name(s.item),
-                format!("§9minecraft:{}", it.names[s.item as usize]),
-            ]);
-        }
-    }
-    if let Some(i) = hovered_hotbar {
-        if ui.input.pressed {
-            ui.input.pressed = false;
-            if ui.input.shift {
-                g.inv.slots[i] = None;
-            } else {
-                g.inv.click(i, false);
-            }
-        } else if ui.input.right_pressed {
-            g.inv.click(i, true);
-        }
-        if g.inv.cursor.is_none()
-            && let Some(s) = g.inv.slots[i]
-        {
-            ui.tooltip(&[it.display_name(s.item)]);
-        }
-    }
-    // Clicking outside drops (deletes) the cursor stack.
-    if ui.input.pressed && !ui.hover(x0, y0, 195.0, 136.0) {
-        g.inv.cursor = None;
-    }
-    cursor_stack(ui, gfx, g);
-    if ui.input.key(Key::Escape) {
-        g.inv.cursor = None;
-        out.push(Action::CloseAll);
-    }
-}

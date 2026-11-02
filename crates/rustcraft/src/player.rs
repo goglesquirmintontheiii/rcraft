@@ -62,6 +62,22 @@ pub struct Player {
     pub food: u32,
     pub air: i32,
     pub fall_distance: f32,
+    #[serde(default = "default_saturation")]
+    pub saturation: f32,
+    #[serde(default)]
+    pub exhaustion: f32,
+    #[serde(default)]
+    pub xp_level: u32,
+    #[serde(default)]
+    pub xp_progress: f32,
+    #[serde(default)]
+    pub xp_total: u32,
+    #[serde(skip)]
+    pub eating: u32,
+    #[serde(skip)]
+    pub sleeping: u32,
+    #[serde(skip)]
+    pub food_timer: u32,
     #[serde(skip)]
     pub sneaking: bool,
     #[serde(skip)]
@@ -74,8 +90,6 @@ pub struct Player {
     pub eyes_in_water: bool,
     #[serde(skip)]
     pub hurt_time: u32,
-    #[serde(skip)]
-    pub regen_timer: u32,
     #[serde(skip)]
     pub walk_dist: f32,
     #[serde(skip)]
@@ -109,13 +123,20 @@ impl Default for Player {
             food: 20,
             air: 300,
             fall_distance: 0.0,
+            saturation: 5.0,
+            exhaustion: 0.0,
+            xp_level: 0,
+            xp_progress: 0.0,
+            xp_total: 0,
+            eating: 0,
+            sleeping: 0,
+            food_timer: 0,
             sneaking: false,
             sprinting: false,
             in_water: false,
             in_lava: false,
             eyes_in_water: false,
             hurt_time: 0,
-            regen_timer: 0,
             walk_dist: 0.0,
             prev_walk_dist: 0.0,
             bob: 0.0,
@@ -126,6 +147,10 @@ impl Default for Player {
             scratch: Vec::new(),
         }
     }
+}
+
+fn default_saturation() -> f32 {
+    5.0
 }
 
 fn slipperiness(s: BlockStateId) -> f64 {
@@ -372,6 +397,7 @@ impl Player {
             };
             if input.jump && self.on_ground {
                 self.vel[1] = JUMP;
+                self.exhaustion += if self.sprinting { 0.2 } else { 0.05 };
                 if self.sprinting {
                     let y = f64::from(self.yaw).to_radians();
                     self.vel[0] -= y.sin() * 0.2;
@@ -379,7 +405,29 @@ impl Player {
                 }
             }
             self.move_relative(fwd, strafe, accel);
+            // Ladders, vines and scaffolding (minecraft.wiki "Ladder"):
+            // horizontal speed and descent capped at 0.15 b/t, sneaking holds
+            // position, pushing into a wall or jumping climbs at 0.2 b/t.
+            let feet = world.get_block(BlockPos::new(
+                self.pos[0].floor() as i32,
+                self.pos[1].floor() as i32,
+                self.pos[2].floor() as i32,
+            ));
+            let climbing = !self.flying && climbable(feet);
+            if climbing {
+                self.vel[0] = self.vel[0].clamp(-0.15, 0.15);
+                self.vel[2] = self.vel[2].clamp(-0.15, 0.15);
+                self.vel[1] = self.vel[1].max(-0.15);
+                if input.sneak && self.vel[1] < 0.0 {
+                    self.vel[1] = 0.0;
+                }
+                self.fall_distance = 0.0;
+            }
+            let pushing = climbing && self.hit_horizontal(world);
             self.do_move(world, false);
+            if climbing && (pushing || input.jump) {
+                self.vel[1] = 0.2;
+            }
             self.vel[1] -= GRAVITY;
             self.vel[1] *= DRAG_Y;
             self.vel[0] *= f;
@@ -514,12 +562,77 @@ impl Player {
             self.hurt_time = 0;
             self.damage(4.0, "fell out of the world");
         }
-        if self.health < 20.0 && self.health > 0.0 && self.food >= 18 {
-            self.regen_timer += 1;
-            if self.regen_timer >= 80 {
-                self.regen_timer = 0;
-                self.health = (self.health + 1.0).min(20.0);
+        // Hunger (minecraft.wiki "Hunger"): exhaustion drains saturation,
+        // then food; full food heals, empty food starves.
+        let moved = ((self.pos[0] - self.prev_pos[0]).powi(2)
+            + (self.pos[2] - self.prev_pos[2]).powi(2))
+        .sqrt() as f32;
+        if self.sprinting {
+            self.exhaustion += 0.1 * moved;
+        } else if self.in_water && self.eyes_in_water {
+            self.exhaustion += 0.01 * moved;
+        }
+        while self.exhaustion >= 4.0 {
+            self.exhaustion -= 4.0;
+            if self.saturation > 0.0 {
+                self.saturation = (self.saturation - 1.0).max(0.0);
+            } else {
+                self.food = self.food.saturating_sub(1);
             }
+        }
+        self.food_timer += 1;
+        if self.food >= 20 && self.saturation > 0.0 && self.health < 20.0 {
+            if self.food_timer >= 10 {
+                let k = self.saturation.min(6.0);
+                self.health = (self.health + k / 6.0).min(20.0);
+                self.exhaustion += k;
+                self.saturation -= k.min(self.saturation);
+                self.food_timer = 0;
+            }
+        } else if self.food >= 18 && self.health < 20.0 {
+            if self.food_timer >= 80 {
+                self.health = (self.health + 1.0).min(20.0);
+                self.exhaustion += 6.0;
+                self.food_timer = 0;
+            }
+        } else if self.food == 0 {
+            if self.food_timer >= 80 {
+                if self.health > 10.0 {
+                    self.hurt_time = 0;
+                    self.damage(1.0, "starved to death");
+                }
+                self.food_timer = 0;
+            }
+        } else {
+            self.food_timer = 0;
+        }
+    }
+
+    /// Eat food: (nutrition, saturation modifier as in the item component).
+    pub fn eat(&mut self, nutrition: u8, saturation: f32) {
+        self.food = (self.food + u32::from(nutrition)).min(20);
+        self.saturation = (self.saturation + saturation).min(self.food as f32);
+    }
+
+    /// Add experience points, levelling up per vanilla's curve.
+    pub fn add_xp(&mut self, points: u32) {
+        self.xp_total += points;
+        let mut p = self.xp_progress * Self::xp_needed(self.xp_level) as f32 + points as f32;
+        while p >= Self::xp_needed(self.xp_level) as f32 {
+            p -= Self::xp_needed(self.xp_level) as f32;
+            self.xp_level += 1;
+        }
+        self.xp_progress = p / Self::xp_needed(self.xp_level) as f32;
+    }
+
+    #[must_use]
+    pub fn xp_needed(level: u32) -> u32 {
+        if level >= 30 {
+            112 + (level - 30) * 9
+        } else if level >= 15 {
+            37 + (level - 15) * 5
+        } else {
+            7 + level * 2
         }
     }
 
@@ -610,6 +723,23 @@ impl Player {
     }
 }
 
+/// Blocks the player can climb (the `#climbable` tag's members).
+fn climbable(s: BlockStateId) -> bool {
+    let n = &rc_data::blocks().def(s).name;
+    matches!(
+        n.as_str(),
+        "ladder"
+            | "vine"
+            | "scaffolding"
+            | "weeping_vines"
+            | "weeping_vines_plant"
+            | "twisting_vines"
+            | "twisting_vines_plant"
+            | "cave_vines"
+            | "cave_vines_plant"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -660,8 +790,11 @@ mod tests {
     #[test]
     fn falls_lands_walks_and_jumps() {
         let w = flat_world();
+        // Food below 18 and no saturation: no natural regeneration.
         let mut p = Player {
             pos: [0.5, 70.0, 0.5],
+            food: 17,
+            saturation: 0.0,
             ..Player::default()
         };
         let idle = MoveInput::default();

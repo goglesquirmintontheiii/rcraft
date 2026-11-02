@@ -249,7 +249,7 @@ impl App {
             KeyCode::KeyE => e.game_key(GameKey::Inventory),
             KeyCode::KeyT => e.game_key(GameKey::Chat(false)),
             KeyCode::Slash => e.game_key(GameKey::Chat(true)),
-            KeyCode::KeyQ => e.game_key(GameKey::Drop),
+            KeyCode::KeyQ => e.game_key(GameKey::Drop(e.input.ctrl)),
             KeyCode::Digit1 => e.game_key(GameKey::Hotbar(0)),
             KeyCode::Digit2 => e.game_key(GameKey::Hotbar(1)),
             KeyCode::Digit3 => e.game_key(GameKey::Hotbar(2)),
@@ -398,6 +398,9 @@ impl ApplicationHandler for App {
                                 e.input.released = true;
                             }
                             e.held.attack = pressed && e.screens.is_empty();
+                            if pressed && e.screens.is_empty() {
+                                e.edges.attack_pressed = true;
+                            }
                         }
                         MouseButton::Right => {
                             if pressed {
@@ -417,14 +420,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some(e) = &mut self.engine {
+                    // Touchpads send many small pixel deltas: accumulate into
+                    // whole wheel notches so scrolling speed matches a mouse.
                     let d = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y,
-                        MouseScrollDelta::PixelDelta(p) => (p.y / 40.0) as f32,
+                        MouseScrollDelta::PixelDelta(p) => (p.y / 60.0) as f32,
                     };
-                    e.input.scroll += d;
-                    if e.screens.is_empty() && d != 0.0 {
-                        e.scroll_ticks += d.signum() as i32;
-                    }
+                    e.add_scroll(d);
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),

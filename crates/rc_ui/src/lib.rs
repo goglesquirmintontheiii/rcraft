@@ -70,6 +70,8 @@ pub struct Theme {
     pub header_separator: Option<Sprite>,
     pub footer_separator: Option<Sprite>,
     pub panorama: Vec<Sprite>,
+    /// Tiled fallback background when no panorama exists (block/dirt).
+    pub dirt: Option<Sprite>,
     pub checkbox: Option<Sprite>,
     pub checkbox_selected: Option<Sprite>,
     // HUD
@@ -95,6 +97,8 @@ pub struct Theme {
     pub creative_tab_top_unselected: Vec<Sprite>,
     pub scroller: Option<Sprite>,
     pub slot_highlight: Option<Sprite>,
+    /// Other named sprites (container backgrounds, progress bars…).
+    pub extra: std::collections::HashMap<String, Sprite>,
 }
 
 /// Keys the UI reacts to.
@@ -323,6 +327,14 @@ impl Ui<'_> {
                 i += 1;
             }
             self.gradient(0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.25], [0.0, 0.0, 0.0, 0.45]);
+        } else if let Some(d) = self.theme.dirt {
+            // Classic options background: dirt tiles at 32 GUI units, darkened.
+            let tile = Sprite {
+                w: 32.0,
+                h: 32.0,
+                ..d
+            };
+            self.tiled(&tile, 0.0, 0.0, w, h, [0.25, 0.25, 0.25, 1.0]);
         } else {
             self.gradient(
                 0.0,

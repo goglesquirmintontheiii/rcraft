@@ -273,6 +273,13 @@ pub struct World {
     pub mesh_out: Vec<([i32; 3], SectionMesh)>,
     /// Chunks dropped from memory (renderer frees their sections).
     pub unloaded: Vec<ChunkPos>,
+    /// Chunks that entered memory this update: (position, freshly generated).
+    pub loaded_events: Vec<(ChunkPos, bool)>,
+    /// Typed block entities of loaded chunks.
+    pub block_entities: AHashMap<BlockPos, crate::blockentity::BlockEntity>,
+    /// Scheduled block ticks: (due tick, position), deduplicated.
+    pub scheduled: std::collections::BinaryHeap<std::cmp::Reverse<(u64, i32, i32, i32)>>,
+    scheduled_set: AHashSet<BlockPos>,
     /// Sections queued for remeshing: (chunk, lo, hi) section range.
     remesh: AHashMap<ChunkPos, (usize, usize)>,
     in_flight: usize,
@@ -378,6 +385,13 @@ impl World {
                 player: None,
                 block_states,
                 biomes,
+                raining: false,
+                thundering: false,
+                rain_time: 0,
+                thunder_time: 0,
+                clear_weather_time: 0,
+                rules: Default::default(),
+                world_type: "normal".into(),
             };
             m.write(&header)?;
             m
@@ -441,6 +455,10 @@ impl World {
             mesh,
             mesh_out: Vec::new(),
             unloaded: Vec::new(),
+            loaded_events: Vec::new(),
+            block_entities: AHashMap::new(),
+            scheduled: std::collections::BinaryHeap::new(),
+            scheduled_set: AHashSet::new(),
             remesh: AHashMap::new(),
             in_flight: 0,
             max_in_flight: threads.max(1) * 3,
@@ -663,7 +681,10 @@ impl World {
             .filter(|p| (p.x - pc.x).abs() > unload_r || (p.z - pc.z).abs() > unload_r)
             .collect();
         for p in far {
+            self.write_block_entities(p);
             if let Some(c) = self.chunks.remove(&p) {
+                self.block_entities
+                    .retain(|bp, _| (bp.x >> 4, bp.z >> 4) != (p.x, p.z));
                 if c.dirty {
                     let _ = self.io_tx.send(IoMsg::Save(c));
                 }
@@ -761,6 +782,9 @@ impl World {
                     return;
                 }
                 self.insert_chunk(c);
+                if let Some(e) = self.loaded_events.last_mut() {
+                    e.1 = true;
+                }
             }
             Done::Lit(p, ver, l, range) => {
                 self.in_flight = self.in_flight.saturating_sub(1);
@@ -811,9 +835,20 @@ impl World {
         }
     }
 
-    fn insert_chunk(&mut self, c: Chunk) {
+    fn insert_chunk(&mut self, mut c: Chunk) {
         let p = c.pos;
         let lit = c.light_valid;
+        for (idx, data) in std::mem::take(&mut c.block_entities) {
+            let bp = BlockPos::new(
+                p.x * 16 + (idx & 15) as i32,
+                WORLD_MIN_Y + (idx >> 8) as i32,
+                p.z * 16 + ((idx >> 4) & 15) as i32,
+            );
+            if let Ok(be) = serde_json::from_slice(&data) {
+                self.block_entities.insert(bp, be);
+            }
+        }
+        self.loaded_events.push((p, false));
         self.chunks.insert(p, Arc::new(c));
         let st = self.state.entry(p).or_default();
         st.version += 1;
@@ -910,8 +945,100 @@ impl World {
         (ready, total)
     }
 
+    /// Serialize the block entities of chunk `p` back into it.
+    fn write_block_entities(&mut self, p: ChunkPos) {
+        let mut list: Vec<(u32, Vec<u8>)> = self
+            .block_entities
+            .iter()
+            .filter(|(bp, _)| (bp.x >> 4, bp.z >> 4) == (p.x, p.z))
+            .filter_map(|(bp, be)| {
+                let idx = (((bp.y - WORLD_MIN_Y) as u32) << 8)
+                    | (((bp.z & 15) as u32) << 4)
+                    | (bp.x & 15) as u32;
+                serde_json::to_vec(be).ok().map(|d| (idx, d))
+            })
+            .collect();
+        list.sort_by_key(|e| e.0);
+        if let Some(c) = self.chunks.get_mut(&p)
+            && c.block_entities != list
+        {
+            let c = Arc::make_mut(c);
+            c.block_entities = list;
+            c.dirty = true;
+        }
+    }
+
+    /// Mark the chunk containing `p` as needing a save.
+    pub fn mark_dirty(&mut self, p: BlockPos) {
+        if let Some(c) = self.chunks.get_mut(&ChunkPos::new(p.x >> 4, p.z >> 4)) {
+            Arc::make_mut(c).dirty = true;
+        }
+    }
+
+    /// Store serialized entities in a chunk (before it unloads or saves).
+    pub fn stash_entities(&mut self, p: ChunkPos, blobs: Vec<Vec<u8>>) {
+        if let Some(c) = self.chunks.get_mut(&p)
+            && (c.entities != blobs)
+        {
+            let c = Arc::make_mut(c);
+            c.entities = blobs;
+            c.dirty = true;
+        }
+    }
+
+    /// Take the serialized entities a chunk was loaded with.
+    pub fn take_entities(&mut self, p: ChunkPos) -> Vec<Vec<u8>> {
+        match self.chunks.get_mut(&p) {
+            Some(c) if !c.entities.is_empty() => std::mem::take(&mut Arc::make_mut(c).entities),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Chunks the next `update` would unload.
+    #[must_use]
+    pub fn chunks_to_unload(&self, player: [f64; 3], render_distance: i32) -> Vec<ChunkPos> {
+        let pc = ChunkPos::new(
+            (player[0].floor() as i32) >> 4,
+            (player[2].floor() as i32) >> 4,
+        );
+        let r = render_distance + 3;
+        self.chunks
+            .keys()
+            .copied()
+            .filter(|p| (p.x - pc.x).abs() > r || (p.z - pc.z).abs() > r)
+            .collect()
+    }
+
+    /// Schedule a block tick `delay` ticks from `now`.
+    pub fn schedule(&mut self, p: BlockPos, now: u64, delay: u64) {
+        if self.scheduled_set.insert(p) {
+            self.scheduled
+                .push(std::cmp::Reverse((now + delay, p.x, p.y, p.z)));
+        }
+    }
+
+    /// Pop scheduled ticks due at `now` (at most `max`).
+    pub fn due_ticks(&mut self, now: u64, max: usize) -> Vec<BlockPos> {
+        let mut out = Vec::new();
+        while out.len() < max {
+            match self.scheduled.peek() {
+                Some(std::cmp::Reverse((t, ..))) if *t <= now => {}
+                _ => break,
+            }
+            let std::cmp::Reverse((_, x, y, z)) = self.scheduled.pop().expect("peeked");
+            let p = BlockPos::new(x, y, z);
+            self.scheduled_set.remove(&p);
+            out.push(p);
+        }
+        out
+    }
+
     /// Queue every dirty chunk for saving.
     pub fn save_dirty(&mut self) {
+        let positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();
+        for p in positions {
+            self.write_block_entities(p);
+        }
         for c in self.chunks.values_mut() {
             if c.dirty {
                 let _ = self.io_tx.send(IoMsg::Save(c.clone()));

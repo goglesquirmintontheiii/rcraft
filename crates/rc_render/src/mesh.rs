@@ -208,7 +208,7 @@ fn rgb(c: u32) -> [f32; 3] {
     ]
 }
 
-const AO_CURVE: [f32; 4] = [0.45, 0.62, 0.8, 1.0];
+const AO_CURVE: [f32; 4] = [0.4, 0.6, 0.8, 1.0];
 
 struct Ctx<'a> {
     snap: &'a Snapshot,

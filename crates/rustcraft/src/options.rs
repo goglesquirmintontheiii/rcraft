@@ -43,6 +43,10 @@ impl Preset {
     }
 }
 
+/// Largest selectable chunk render distance (full-detail chunks; LOD
+/// rendering later extends the view to 1024 chunks).
+pub const MAX_RENDER_DISTANCE: i32 = 128;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Options {
@@ -75,6 +79,8 @@ pub struct Options {
     pub assets_path: Option<String>,
     pub show_fps: bool,
     pub preset: Preset,
+    /// Volume per sound category (vanilla order, see `rc_audio::Category::ALL`).
+    pub volumes: [f32; 8],
 }
 
 impl Default for Options {
@@ -102,6 +108,7 @@ impl Default for Options {
             assets_path: None,
             show_fps: false,
             preset: Preset::High,
+            volumes: [1.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         }
     }
 }
@@ -146,8 +153,10 @@ impl Options {
     /// including meshes and worldgen working set).
     #[must_use]
     pub fn effective_render_distance(&self) -> i32 {
-        let budget_chunks = (f64::from(self.max_memory_mb) * 0.5 / 0.5) as i32;
-        let mut rd = self.render_distance.clamp(2, 32);
+        // ~250 MiB is fixed cost (assets, atlas, GPU staging, worldgen
+        // caches); the rest holds chunks at ~0.6 MiB each with meshes.
+        let budget_chunks = ((f64::from(self.max_memory_mb) - 250.0).max(64.0) / 0.6) as i32;
+        let mut rd = self.render_distance.clamp(2, MAX_RENDER_DISTANCE);
         while rd > 2 && (2 * rd + 7).pow(2) > budget_chunks {
             rd -= 1;
         }
@@ -228,5 +237,8 @@ mod tests {
         assert!(o.effective_render_distance() <= 8);
         o.max_memory_mb = 32768;
         assert_eq!(o.effective_render_distance(), 32);
+        o.render_distance = 500;
+        o.max_memory_mb = u32::MAX / 2;
+        assert_eq!(o.effective_render_distance(), MAX_RENDER_DISTANCE);
     }
 }

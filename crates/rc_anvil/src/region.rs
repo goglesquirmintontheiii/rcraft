@@ -87,3 +87,48 @@ impl RegionFile {
         }
     }
 }
+
+/// Writes a complete `.mca` region from chunk NBT documents.
+#[derive(Debug, Default)]
+pub struct RegionWriter {
+    chunks: Vec<((i32, i32), Vec<u8>)>,
+}
+
+impl RegionWriter {
+    /// Add a chunk (local coords 0..32) as an NBT document.
+    pub fn add(&mut self, x: i32, z: i32, tag: &Tag) -> Result<()> {
+        use std::io::Write as _;
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(&nbt::write(tag))?;
+        self.chunks.push(((x & 31, z & 31), e.finish()?));
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    /// Serialize the region file.
+    #[must_use]
+    pub fn finish(self, timestamp: u32) -> Vec<u8> {
+        let mut out = vec![0u8; 8192];
+        let mut sector = 2u32;
+        for ((x, z), data) in self.chunks {
+            let i = ((z << 5) | x) as usize * 4;
+            let len = data.len() + 1;
+            let sectors = (len + 4).div_ceil(4096) as u32;
+            out[i] = (sector >> 16) as u8;
+            out[i + 1] = (sector >> 8) as u8;
+            out[i + 2] = sector as u8;
+            out[i + 3] = sectors.min(255) as u8;
+            out[4096 + i..4096 + i + 4].copy_from_slice(&timestamp.to_be_bytes());
+            out.extend_from_slice(&(len as u32).to_be_bytes());
+            out.push(2);
+            out.extend_from_slice(&data);
+            out.resize((sector + sectors) as usize * 4096, 0);
+            sector += sectors;
+        }
+        out
+    }
+}

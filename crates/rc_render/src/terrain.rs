@@ -75,7 +75,7 @@ fn fs_solid(v: VOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_cutout(v: VOut) -> @location(0) vec4<f32> {
     let tex = textureSample(atlas, atlas_s, v.uv);
-    if (tex.a < 0.5) { discard; }
+    if (tex.a < 0.1) { discard; }
     return vec4<f32>(shade(v, tex).rgb, 1.0);
 }
 
@@ -166,6 +166,14 @@ fn fs_quad_blend(v: QOut) -> @location(0) vec4<f32> {
     if (t.a < 0.01) { discard; }
     let f = clamp((v.dist - g.fog.x) / max(g.fog.y - g.fog.x, 0.001), 0.0, 1.0);
     return vec4<f32>(mix(t.rgb, g.fog_color.rgb, f), t.a);
+}
+
+@fragment
+fn fs_quad_cutout(v: QOut) -> @location(0) vec4<f32> {
+    let t = textureSample(qtex, qtex_s, v.uv) * v.color;
+    if (t.a < 0.1) { discard; }
+    let f = clamp((v.dist - g.fog.x) / max(g.fog.y - g.fog.x, 0.001), 0.0, 1.0);
+    return vec4<f32>(mix(t.rgb, g.fog_color.rgb, f), 1.0);
 }
 
 // ---- lines ----
@@ -279,6 +287,19 @@ pub struct TerrainRenderer {
     /// Breaking overlay quads (world space), filled by the game.
     pub overlay: Vec<QuadVertex>,
     overlay_bind: wgpu::BindGroup,
+    quad_cutout: wgpu::RenderPipeline,
+    /// Bind groups for textures usable by batches; 0 is the block atlas.
+    textures: Vec<wgpu::BindGroup>,
+    /// Camera-relative cutout triangles per texture (entities, particles,
+    /// dropped items). Cleared by [`Self::clear_batches`]; capacity is kept.
+    pub batches: Vec<Vec<QuadVertex>>,
+    /// Camera-relative alpha-blended triangles per texture (rain, snow).
+    pub blend_batches: Vec<Vec<QuadVertex>>,
+    /// Camera-relative first-person triangles per texture, drawn on top.
+    pub hand_batches: Vec<Vec<QuadVertex>>,
+    batch_buf: wgpu::Buffer,
+    batch_scratch: Vec<QuadVertex>,
+    batch_ranges: Vec<(u8, usize, u32, u32)>,
 }
 
 impl std::fmt::Debug for TerrainRenderer {
@@ -623,6 +644,31 @@ impl TerrainRenderer {
             alpha: wgpu::BlendComponent::OVER,
         };
         let quad_add = make_q("fs_quad_add", additive, false);
+        let quad_cutout = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("quad-cutout"),
+            layout: Some(&layout_q),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_quad"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &qbuf,
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: depth(true, wgpu::CompareFunction::LessEqual),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_quad_cutout"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let quad_blend = make_q("fs_quad_blend", wgpu::BlendState::ALPHA_BLENDING, true);
         let lattrs = wgpu::vertex_attr_array![0 => Float32x3];
         let lines = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -758,7 +804,20 @@ impl TerrainRenderer {
             stats: RenderStats::default(),
             color_format,
             overlay: Vec::new(),
+            textures: vec![overlay_bind.clone()],
             overlay_bind,
+            quad_cutout,
+            batches: vec![Vec::new()],
+            blend_batches: vec![Vec::new()],
+            hand_batches: vec![Vec::new()],
+            batch_buf: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("batches"),
+                size: 256 * 1024,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            batch_scratch: Vec::with_capacity(4096),
+            batch_ranges: Vec::with_capacity(32),
         };
         r.ensure_index(device, 1 << 16);
         r
@@ -780,6 +839,63 @@ impl TerrainRenderer {
             usage: wgpu::BufferUsages::INDEX,
         });
         self.index_quads = n;
+    }
+
+    /// Register a texture for batches (nearest filtering, clamped); returns
+    /// its batch index. Index 0 is always the block atlas.
+    pub fn add_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        img: &Image,
+        label: &str,
+        repeat: bool,
+    ) -> usize {
+        let mode = if repeat {
+            wgpu::AddressMode::Repeat
+        } else {
+            wgpu::AddressMode::ClampToEdge
+        };
+        let (_, view) = texture_from_image(device, queue, img, label);
+        let s = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some(label),
+            address_mode_u: mode,
+            address_mode_v: mode,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        self.textures
+            .push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.bgl_tex,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&s),
+                    },
+                ],
+            }));
+        self.batches.push(Vec::new());
+        self.blend_batches.push(Vec::new());
+        self.hand_batches.push(Vec::new());
+        self.textures.len() - 1
+    }
+
+    /// Empty all batches, keeping their allocations.
+    pub fn clear_batches(&mut self) {
+        for b in self
+            .batches
+            .iter_mut()
+            .chain(self.blend_batches.iter_mut())
+            .chain(self.hand_batches.iter_mut())
+        {
+            b.clear();
+        }
     }
 
     /// A view of the block atlas (for GUI item icons).
@@ -1213,6 +1329,36 @@ impl TerrainRenderer {
             queue.write_buffer(&self.line_buf, 0, lbytes);
         }
 
+        // Batches: one vertex buffer, ranges per (kind, texture).
+        self.batch_scratch.clear();
+        self.batch_ranges.clear();
+        for (kind, list) in [
+            (0u8, &self.batches),
+            (1, &self.blend_batches),
+            (2, &self.hand_batches),
+        ] {
+            for (t, b) in list.iter().enumerate() {
+                if !b.is_empty() {
+                    let start = self.batch_scratch.len() as u32;
+                    self.batch_scratch.extend_from_slice(b);
+                    self.batch_ranges
+                        .push((kind, t, start, self.batch_scratch.len() as u32));
+                }
+            }
+        }
+        let bbytes = bytemuck::cast_slice::<QuadVertex, u8>(&self.batch_scratch);
+        if bbytes.len() as u64 > self.batch_buf.size() {
+            self.batch_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("batches"),
+                size: (bbytes.len() as u64).next_power_of_two(),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !bbytes.is_empty() {
+            queue.write_buffer(&self.batch_buf, 0, bbytes);
+        }
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("world"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1263,6 +1409,16 @@ impl TerrainRenderer {
                 }
             }
         }
+        if self.batch_ranges.iter().any(|r| r.0 == 0) {
+            pass.set_pipeline(&self.quad_cutout);
+            pass.set_vertex_buffer(0, self.batch_buf.slice(..));
+            for &(k, t, a, b) in &self.batch_ranges {
+                if k == 0 {
+                    pass.set_bind_group(1, &self.textures[t], &[]);
+                    pass.draw(a..b, 0..1);
+                }
+            }
+        }
         if !lines.is_empty() {
             pass.set_pipeline(&self.lines);
             pass.set_vertex_buffer(0, self.line_buf.slice(..));
@@ -1292,7 +1448,53 @@ impl TerrainRenderer {
             pass.set_vertex_buffer(0, self.quad_buf.slice(..));
             pass.draw(overlay_start..overlay_start + overlay_n, 0..1);
         }
-        let _ = (forward, &self.bgl_tex);
+        if self.batch_ranges.iter().any(|r| r.0 == 1) {
+            pass.set_pipeline(&self.quad_blend);
+            pass.set_vertex_buffer(0, self.batch_buf.slice(..));
+            for &(k, t, a, b) in &self.batch_ranges {
+                if k == 1 {
+                    pass.set_bind_group(1, &self.textures[t], &[]);
+                    pass.draw(a..b, 0..1);
+                }
+            }
+        }
+        drop(pass);
+        let _ = forward;
+        // First-person hand/item: fresh depth so it never clips into walls.
+        if self.batch_ranges.iter().any(|r| r.0 == 2) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hand"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.bind, &[]);
+            pass.set_pipeline(&self.quad_cutout);
+            pass.set_vertex_buffer(0, self.batch_buf.slice(..));
+            for &(k, t, a, b) in &self.batch_ranges {
+                if k == 2 {
+                    pass.set_bind_group(1, &self.textures[t], &[]);
+                    pass.draw(a..b, 0..1);
+                }
+            }
+        }
     }
 }
 
