@@ -25,7 +25,7 @@ const DATA_VERSION: i32 = 3955;
 #[must_use]
 pub fn find_java_worlds() -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
-    for mc in rc_assets::source::minecraft_dirs() {
+    for mc in rc_assets::source::game_dirs() {
         let Ok(rd) = std::fs::read_dir(mc.join("saves")) else {
             continue;
         };
@@ -303,6 +303,7 @@ pub fn import(java_dir: &Path, dest: &Path) -> Result<String> {
         clear_weather_time: get_i("clearWeatherTime"),
         rules,
         world_type: "normal".into(),
+        dimension: String::new(),
     };
     meta.write(&dest.join("world.rcw"))?;
     info!(chunks = count, %name, "imported Java world");
@@ -688,6 +689,7 @@ mod tests {
             clear_weather_time: 0,
             rules: Default::default(),
             world_type: "normal".into(),
+            dimension: String::new(),
         };
         meta.write(&src.join("world.rcw")).unwrap();
         let java = base.join("java");

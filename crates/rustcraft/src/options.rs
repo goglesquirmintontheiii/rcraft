@@ -77,6 +77,9 @@ pub struct Options {
     pub update_policy: rc_update::UpdatePolicy,
     /// Explicit path to a Minecraft jar or assets folder.
     pub assets_path: Option<String>,
+    /// Minecraft directory chosen by the player (a `.minecraft`, a Prism /
+    /// MultiMC data folder, or an instance folder); `None` = auto-detect.
+    pub minecraft_dir: Option<String>,
     pub show_fps: bool,
     pub preset: Preset,
     /// Volume per sound category (vanilla order, see `rc_audio::Category::ALL`).
@@ -106,6 +109,7 @@ impl Default for Options {
             gpu_limit_percent: 100,
             update_policy: rc_update::UpdatePolicy::Ask,
             assets_path: None,
+            minecraft_dir: None,
             show_fps: false,
             preset: Preset::High,
             volumes: [1.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -125,10 +129,44 @@ fn default_memory_mb() -> u32 {
 
 impl Options {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
+        let mut o: Self = std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        o.sanitize();
+        o
+    }
+
+    /// Clamp every value into its supported range, so a hand-edited file or
+    /// one written by another version can never crash startup.
+    pub fn sanitize(&mut self) {
+        let d = Self::default();
+        let finite = |v: f32, lo: f32, hi: f32, def: f32| {
+            if v.is_finite() { v.clamp(lo, hi) } else { def }
+        };
+        self.render_distance = self.render_distance.clamp(2, MAX_RENDER_DISTANCE);
+        self.fov = finite(self.fov, 30.0, 110.0, d.fov);
+        self.gui_scale = self.gui_scale.min(8);
+        self.brightness = finite(self.brightness, 0.0, 1.0, d.brightness);
+        self.mouse_sensitivity = finite(self.mouse_sensitivity, 0.0, 1.0, d.mouse_sensitivity);
+        self.mipmap_levels = self.mipmap_levels.min(4);
+        self.anisotropy = 1;
+        self.max_memory_mb = self.max_memory_mb.max(256);
+        self.gpu_limit_percent = self.gpu_limit_percent.clamp(10, 100);
+        for v in &mut self.volumes {
+            *v = finite(*v, 0.0, 1.0, 1.0);
+        }
+    }
+
+    /// Tell the asset finder about the player's chosen Minecraft directory.
+    pub fn apply_minecraft_dir(&self) {
+        rc_assets::source::set_custom_minecraft_dir(
+            self.minecraft_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from),
+        );
     }
 
     pub fn save(&self, path: &Path) {
@@ -149,13 +187,13 @@ impl Options {
         }
     }
 
-    /// Render distance after the memory limit (≈0.5 MiB per loaded chunk
-    /// including meshes and worldgen working set).
+    /// Render distance after the memory limit.
     #[must_use]
     pub fn effective_render_distance(&self) -> i32 {
-        // ~250 MiB is fixed cost (assets, atlas, GPU staging, worldgen
-        // caches); the rest holds chunks at ~0.6 MiB each with meshes.
-        let budget_chunks = ((f64::from(self.max_memory_mb) - 250.0).max(64.0) / 0.6) as i32;
+        // ~380 MiB is fixed cost (GPU driver, assets, atlas, worldgen
+        // caches); loaded chunks with meshes and worldgen in flight cost
+        // ~0.15 MiB each (measured with `--scene bench`, 0.2.1).
+        let budget_chunks = ((f64::from(self.max_memory_mb) - 380.0).max(16.0) / 0.15) as i32;
         let mut rd = self.render_distance.clamp(2, MAX_RENDER_DISTANCE);
         while rd > 2 && (2 * rd + 7).pow(2) > budget_chunks {
             rd -= 1;
@@ -216,7 +254,6 @@ impl Options {
                 self.smooth_lighting = true;
                 self.clouds = true;
                 self.mipmap_levels = 4;
-                self.anisotropy = 8;
                 self.max_memory_mb = 12288;
             }
         }
@@ -234,7 +271,7 @@ mod tests {
             max_memory_mb: 512,
             ..Options::default()
         };
-        assert!(o.effective_render_distance() <= 8);
+        assert!(o.effective_render_distance() <= 12);
         o.max_memory_mb = 32768;
         assert_eq!(o.effective_render_distance(), 32);
         o.render_distance = 500;

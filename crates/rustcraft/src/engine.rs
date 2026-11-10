@@ -85,6 +85,9 @@ pub struct Engine {
     /// Render-distance cap from measured process memory (see `memory_guard`).
     mem_rd_cap: i32,
     mem_check: Instant,
+    /// Process memory before the world opened (driver, assets, …): the part
+    /// the render distance cannot reduce.
+    base_mem_mb: f32,
 }
 
 impl std::fmt::Debug for Engine {
@@ -141,6 +144,7 @@ impl Engine {
             music_cooldown: 600,
             mem_rd_cap: crate::options::MAX_RENDER_DISTANCE,
             mem_check: Instant::now(),
+            base_mem_mb: 0.0,
             ambient_cooldown: 0,
             opts,
             game_dir,
@@ -185,25 +189,33 @@ impl Engine {
             .max(2)
     }
 
-    /// Enforce the memory limit against real usage: step the view distance
-    /// down while over the limit, back up slowly once well under it.
+    /// Enforce the memory limit against real usage. Loaded chunks cost
+    /// roughly (2r+7)² × per-chunk, so when over the limit the view distance
+    /// is scaled by the square root of how far over the chunk part is,
+    /// instead of one step every two seconds (issue #2).
     fn memory_guard(&mut self) {
-        if self.mem_check.elapsed() < Duration::from_secs(2) || self.game.is_none() {
+        if Instant::now() < self.mem_check + Duration::from_secs(1) || self.game.is_none() {
             return;
         }
         self.mem_check = Instant::now();
-        let used = self.stats.mem_mb;
+        let used = crate::sysinfo::process_memory_mb();
         let limit = self.opts.max_memory_mb as f32;
         let cur = self.render_distance();
-        if used > limit * 1.05 && cur > 2 {
-            self.mem_rd_cap = cur - 1;
+        let base = self.base_mem_mb.max(1.0);
+        if used > limit * 1.03 && cur > 2 {
+            let chunk_used = (used - base).max(1.0);
+            let chunk_budget = (limit - base).max(0.0) * 0.9;
+            let side = (2 * cur + 7) as f32 * (chunk_budget / chunk_used).sqrt();
+            let rd = (((side - 7.0) / 2.0).floor() as i32).clamp(2, cur - 1);
+            self.mem_rd_cap = rd;
+            // Let the unloads land (and the allocator settle) before
+            // measuring again, so one overshoot is not counted twice.
+            self.mem_check = Instant::now() + Duration::from_secs(6);
             warn!(
                 used,
-                limit,
-                rd = self.mem_rd_cap,
-                "over the memory limit; reducing render distance"
+                limit, base, rd, "over the memory limit; reducing render distance"
             );
-        } else if used < limit * 0.75 && self.mem_rd_cap < self.opts.effective_render_distance() {
+        } else if used < limit * 0.8 && self.mem_rd_cap < self.opts.effective_render_distance() {
             self.mem_rd_cap += 1;
         }
     }
@@ -294,6 +306,8 @@ impl Engine {
 
     /// Open the world in `saves/<dir>`, or create it from `create`.
     pub fn open_world(&mut self, dir: Option<&str>, create: Option<NewWorld>) -> Result<()> {
+        self.base_mem_mb = crate::sysinfo::process_memory_mb();
+        self.mem_rd_cap = crate::options::MAX_RENDER_DISTANCE;
         let dir_name = match (&create, dir) {
             (Some(c), _) => crate::worlds::new_dir_name(&self.game_dir, &c.name),
             (None, Some(d)) => d.to_owned(),
@@ -327,6 +341,48 @@ impl Engine {
         ));
         self.game = Some(g);
         self.world_name = Some(dir_name);
+        self.screens = vec![Screen::Loading];
+        Ok(())
+    }
+
+    /// Move the player to another dimension of the same world: save, then
+    /// reopen the world streaming that dimension.
+    pub fn change_dimension(&mut self, dim: &str, pos: [f64; 3]) -> Result<()> {
+        let Some(dir_name) = self.world_name.clone() else {
+            return Ok(());
+        };
+        let Some(mut g) = self.game.take() else {
+            return Ok(());
+        };
+        let respawning = !g.spawned;
+        g.player.pos = pos;
+        g.player.prev_pos = pos;
+        g.player.vel = [0.0; 3];
+        g.world.meta.dimension = if dim == "overworld" {
+            String::new()
+        } else {
+            dim.to_owned()
+        };
+        g.save();
+        drop(g);
+        self.gfx.terrain.clear();
+        self.gfx.terrain.clear_batches();
+        let path = crate::worlds::world_path(&self.game_dir, &dir_name);
+        let world = World::open(
+            &path,
+            &dir_name,
+            0,
+            self.opts.worker_threads(),
+            mesh_shared(&self.gfx, &self.opts),
+        )?;
+        let mut g = Game::new(world);
+        if respawning {
+            // Died elsewhere: find the spawn point again.
+            g.spawned = false;
+        } else {
+            g.arriving = true;
+        }
+        self.game = Some(g);
         self.screens = vec![Screen::Loading];
         Ok(())
     }
@@ -450,10 +506,16 @@ impl Engine {
         };
         let sun_h = (tod * std::f32::consts::TAU).cos();
         let daylight = (sun_h * 2.0 + 0.5).clamp(0.0, 1.0);
+        let overworld = g.world.dimension == rc_worldgen::Dimension::Overworld;
         let mut sky = rgb(biome.sky_color);
         let mut fog = rgb(biome.fog_color);
-        for c in sky.iter_mut().chain(fog.iter_mut()) {
-            *c *= daylight * 0.94 + 0.06;
+        if overworld {
+            for c in sky.iter_mut().chain(fog.iter_mut()) {
+                *c *= daylight * 0.94 + 0.06;
+            }
+        } else {
+            // No sky in the Nether or the End: everything fades to fog.
+            sky = fog;
         }
         let underwater = p.eyes_in_water;
         if underwater {
@@ -470,10 +532,15 @@ impl Engine {
             render_distance_blocks: rd,
             sky_color: sky,
             fog_color: fog,
-            time_of_day: (0.25 - tod).rem_euclid(1.0),
+            time_of_day: if overworld {
+                (0.25 - tod).rem_euclid(1.0)
+            } else {
+                0.25
+            },
             underwater,
             cloud_offset: (g.tick as f32 + partial as f32) * 0.03,
             clouds: self.opts.clouds,
+            celestial: overworld,
             outline: None,
         })
     }
@@ -505,6 +572,15 @@ impl Engine {
         self.memory_guard();
         self.time += (dt * 20.0) as f32;
         self.simulate(dt);
+        if let Some((dim, pos)) = self.game.as_mut().and_then(|g| g.wants_dimension.take())
+            && let Err(e) = self.change_dimension(&dim, pos)
+        {
+            warn!("changing dimension: {e:#}");
+            self.close_world();
+        }
+        let t_sim = t0.elapsed();
+        let mut t_stream = Duration::ZERO;
+        let mut t_upload = Duration::ZERO;
         // Stream chunks and upload finished meshes.
         let rd = self.render_distance();
         if let Some(g) = self.game.as_mut() {
@@ -516,10 +592,12 @@ impl Engine {
             } else {
                 Duration::from_millis(3)
             };
+            let ts = Instant::now();
             g.stream(rd, budget);
             for p in g.world.unloaded.drain(..) {
                 self.gfx.terrain.remove_chunk(p.x, p.z);
             }
+            t_stream = ts.elapsed();
             let upload_start = Instant::now();
             let mut n = 0;
             while let Some((origin, mesh)) = g.world.mesh_out.pop() {
@@ -529,6 +607,7 @@ impl Engine {
                     break;
                 }
             }
+            t_upload = upload_start.elapsed();
             // A block GUI opened this tick.
             if g.container.is_some() && self.screens.is_empty() {
                 self.screens.push(Screen::Inventory);
@@ -701,6 +780,15 @@ impl Engine {
         queue.submit([encoder.finish()]);
         // Stats.
         let ft = t0.elapsed().as_secs_f32() * 1000.0;
+        if ft > 50.0 {
+            warn!(
+                frame_ms = ft,
+                simulate_ms = t_sim.as_secs_f32() * 1000.0,
+                stream_ms = t_stream.as_secs_f32() * 1000.0,
+                upload_ms = t_upload.as_secs_f32() * 1000.0,
+                "long frame"
+            );
+        }
         self.frame_times.push(dt as f32);
         if self.frame_times.len() > 30 {
             self.frame_times.remove(0);
@@ -967,7 +1055,16 @@ impl Engine {
                     && g.player.mode != GameMode::Spectator
                 {
                     g.drop_held(whole);
-                    g.swing = 6;
+                    g.swing_arm(true);
+                }
+            }
+            GameKey::SwapHands => {
+                if top.is_none()
+                    && let Some(g) = self.game.as_mut()
+                    && g.player.mode != GameMode::Spectator
+                {
+                    let sel = g.inv.selected;
+                    g.inv.slots.swap(sel, crate::items::OFFHAND_SLOT);
                 }
             }
         }
@@ -984,6 +1081,8 @@ pub enum GameKey {
     F1,
     /// Q (true with Ctrl: whole stack).
     Drop(bool),
+    /// F: swap the held item with the offhand.
+    SwapHands,
 }
 
 fn install_update(st: &Arc<Mutex<rc_update::Status>>, m: &rc_update::Manifest) {

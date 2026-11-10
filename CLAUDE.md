@@ -14,9 +14,13 @@
 - Headless rendering in the dev container: install `mesa-vulkan-drivers`, then
   `WGPU_BACKEND=vulkan VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
   Screenshots go in `docs/screenshots/phase<N>/` and are committed.
-- No Windows toolchain locally: releases are produced by `.github/workflows/release.yml`
-  on tag push `vX.Y.Z` (bump `workspace.package.version` first). Phase 1 ships
-  `.exe` only; Phase 2+ also `.AppImage`.
+- Prefer local checks over GitHub CI (it is slow): `tools/local-ci.sh check` runs
+  fmt, clippy and tests for Linux and for Windows (cross-compiled with MinGW,
+  tests under Wine); `tools/local-ci.sh dist <dir>` builds the `.exe`, the
+  `.AppImage` (in an Ubuntu 22.04 podman container for glibc 2.35) plus
+  `latest.json` and `SHA256SUMS`. GitHub releases still come from
+  `.github/workflows/release.yml` on tag push `vX.Y.Z` (bump
+  `workspace.package.version` first).
 - Worldgen is **seed-exact** with vanilla 1.21.1 (ADR-012): RNG/noise must be
   bit-exact; every stage is diff-tested against reference captures in
   `tests/parity/` taken from the owner's own game. Ask the owner for new

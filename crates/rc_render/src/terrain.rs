@@ -231,6 +231,8 @@ pub struct FrameParams {
     pub underwater: bool,
     pub cloud_offset: f32,
     pub clouds: bool,
+    /// Sun, moon and stars (overworld only).
+    pub celestial: bool,
     /// Selected block outline boxes in world space.
     pub outline: Option<([i32; 3], &'static [[f64; 6]])>,
 }
@@ -243,7 +245,6 @@ pub struct Outline {
 }
 
 struct GpuSection {
-    origin: [i32; 3],
     layers: [Option<(wgpu::Buffer, u32)>; 3],
 }
 
@@ -273,8 +274,12 @@ pub struct TerrainRenderer {
     instance: wgpu::Buffer,
     instance_cap: usize,
     instance_data: Vec<[f32; 4]>,
-    draw_list: Vec<(usize, u32, f32)>,
+    /// Visible sections this frame: (distance², instance, origin). Reused.
+    draw_order: Vec<(f32, u32, [i32; 3])>,
     sections: AHashMap<[i32; 3], GpuSection>,
+    /// Chunk columns with uploaded sections: bit `i` = section `i` present.
+    /// Lets culling skip whole columns and unloading touch only 24 keys.
+    columns: AHashMap<(i32, i32), u32>,
     sun_bind: Option<wgpu::BindGroup>,
     moon_bind: Option<wgpu::BindGroup>,
     cloud_bind: Option<wgpu::BindGroup>,
@@ -399,13 +404,16 @@ impl TerrainRenderer {
         let atlas_s = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas"),
             mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: if anisotropy > 1 {
-                wgpu::FilterMode::Linear
-            } else {
-                wgpu::FilterMode::Nearest
-            },
+            min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            anisotropy_clamp: anisotropy.max(1),
+            // Anisotropic filtering requires linear magnification, which would
+            // blur the pixel-art textures up close (and asking for it with a
+            // nearest filter is a validation error that crashed 0.2.0 at
+            // startup with the Ultra preset, issue #2). Kept at 1.
+            anisotropy_clamp: {
+                let _ = anisotropy;
+                1
+            },
             ..Default::default()
         });
         let lightmap_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -792,8 +800,9 @@ impl TerrainRenderer {
             instance,
             instance_cap,
             instance_data: Vec::with_capacity(instance_cap),
-            draw_list: Vec::with_capacity(instance_cap * 3),
+            draw_order: Vec::with_capacity(instance_cap),
             sections: AHashMap::new(),
+            columns: AHashMap::new(),
             sun_bind,
             moon_bind,
             cloud_bind,
@@ -915,10 +924,19 @@ impl TerrainRenderer {
 
     /// Upload (or replace) the mesh of a section at world-space `origin`.
     pub fn upload(&mut self, device: &wgpu::Device, origin: [i32; 3], mesh: &SectionMesh) {
+        let col = (origin[0].div_euclid(16), origin[2].div_euclid(16));
+        let bit = 1u32 << ((origin[1] - rc_core::WORLD_MIN_Y).div_euclid(16)).clamp(0, 31);
         if mesh.is_empty() {
             self.sections.remove(&origin);
+            if let Some(m) = self.columns.get_mut(&col) {
+                *m &= !bit;
+                if *m == 0 {
+                    self.columns.remove(&col);
+                }
+            }
             return;
         }
+        *self.columns.entry(col).or_insert(0) |= bit;
         let mut most = 0;
         let mk = |v: &[Vertex], label: &str| {
             (!v.is_empty()).then(|| {
@@ -941,17 +959,27 @@ impl TerrainRenderer {
             most = most.max(*q);
         }
         self.ensure_index(device, most);
-        self.sections.insert(origin, GpuSection { origin, layers });
+        self.sections.insert(origin, GpuSection { layers });
     }
 
     /// Drop all sections of a chunk column.
     pub fn remove_chunk(&mut self, cx: i32, cz: i32) {
-        self.sections
-            .retain(|k, _| !(k[0] == cx * 16 && k[2] == cz * 16));
+        // Only this column's keys: a full scan of every section per unloaded
+        // chunk caused long frames at large render distances (issue #2).
+        let Some(mask) = self.columns.remove(&(cx, cz)) else {
+            return;
+        };
+        for sy in 0..32 {
+            if mask & (1 << sy) != 0 {
+                self.sections
+                    .remove(&[cx * 16, rc_core::WORLD_MIN_Y + sy * 16, cz * 16]);
+            }
+        }
     }
 
     pub fn clear(&mut self) {
         self.sections.clear();
+        self.columns.clear();
     }
 
     #[must_use]
@@ -1082,7 +1110,11 @@ impl TerrainRenderer {
         let (sp, cp) = p.pitch.to_radians().sin_cos();
         // Minecraft yaw: 0 = +Z (south), 90 = -X (west).
         let forward = Vec3::new(-sy * cp, -sp, cy * cp);
-        let view = look_to(forward, Vec3::Y);
+        // The right vector comes from yaw alone, so looking straight up or
+        // down (forward parallel to +Y, where a cross product with up
+        // degenerates) never flips the view (issue #2).
+        let right = Vec3::new(-cy, 0.0, -sy);
+        let view = view_from_basis(forward, right);
         let far = (p.render_distance_blocks * 1.5).max(256.0) + 256.0;
         let proj = perspective(p.fov_y_deg.to_radians(), p.aspect.max(0.01), 0.05, far);
         (proj * view, forward)
@@ -1130,33 +1162,51 @@ impl TerrainRenderer {
         let planes = frustum_planes(vp);
         let cam = p.cam_pos;
         self.instance_data.clear();
-        self.draw_list.clear();
+        let mut order = std::mem::take(&mut self.draw_order);
+        order.clear();
         let max_d2 = (rd + 24.0) * (rd + 24.0);
         let mut quads = 0usize;
-        for (key, s) in &self.sections {
-            let off = [
-                (f64::from(s.origin[0]) - cam[0]) as f32,
-                (f64::from(s.origin[1]) - cam[1]) as f32,
-                (f64::from(s.origin[2]) - cam[2]) as f32,
-            ];
-            let c = Vec3::new(off[0] + 8.0, off[1] + 8.0, off[2] + 8.0);
-            if c.x * c.x + c.z * c.z > max_d2 {
+        for (&(cx, cz), &mask) in &self.columns {
+            // Whole-column test first (24 sections at once).
+            let ox = (f64::from(cx * 16) - cam[0]) as f32;
+            let oz = (f64::from(cz * 16) - cam[2]) as f32;
+            let (ccx, ccz) = (ox + 8.0, oz + 8.0);
+            if ccx * ccx + ccz * ccz > max_d2 {
                 continue;
             }
-            if !sphere_visible(&planes, c, 14.0) {
+            let lo = mask.trailing_zeros() as i32;
+            let hi = 31 - mask.leading_zeros() as i32;
+            let y0 = (f64::from(rc_core::WORLD_MIN_Y + lo * 16) - cam[1]) as f32;
+            let y1 = (f64::from(rc_core::WORLD_MIN_Y + hi * 16 + 16) - cam[1]) as f32;
+            let half_h = (y1 - y0) / 2.0;
+            let cc = Vec3::new(ccx, (y0 + y1) / 2.0, ccz);
+            if !sphere_visible(&planes, cc, (128.0 + half_h * half_h).sqrt()) {
                 continue;
             }
-            let _ = key;
-            let inst = self.instance_data.len() as u32;
-            self.instance_data.push([off[0], off[1], off[2], 0.0]);
-            self.draw_list.push((0, inst, c.length_squared()));
-            for (_, q) in s.layers.iter().flatten() {
-                quads += *q as usize;
+            for sy in lo..=hi {
+                if mask & (1 << sy) == 0 {
+                    continue;
+                }
+                let origin = [cx * 16, rc_core::WORLD_MIN_Y + sy * 16, cz * 16];
+                let oy = (f64::from(origin[1]) - cam[1]) as f32;
+                let c = Vec3::new(ccx, oy + 8.0, ccz);
+                if !sphere_visible(&planes, c, 14.0) {
+                    continue;
+                }
+                let Some(s) = self.sections.get(&origin) else {
+                    continue;
+                };
+                let inst = self.instance_data.len() as u32;
+                self.instance_data.push([ox, oy, oz, 0.0]);
+                order.push((c.length_squared(), inst, origin));
+                for (_, q) in s.layers.iter().flatten() {
+                    quads += *q as usize;
+                }
             }
         }
         self.stats = RenderStats {
             sections_total: self.sections.len(),
-            sections_drawn: self.draw_list.len(),
+            sections_drawn: order.len(),
             quads_drawn: quads,
         };
         if self.instance_data.len() > self.instance_cap {
@@ -1171,24 +1221,7 @@ impl TerrainRenderer {
         if !self.instance_data.is_empty() {
             queue.write_buffer(&self.instance, 0, bytemuck::cast_slice(&self.instance_data));
         }
-        // Sections by key in draw order: front-to-back for opaque.
-        let mut order: Vec<(f32, u32, [i32; 3])> = Vec::with_capacity(self.draw_list.len());
-        {
-            let mut i = 0;
-            for s in self.sections.values() {
-                let off = [
-                    (f64::from(s.origin[0]) - cam[0]) as f32,
-                    (f64::from(s.origin[1]) - cam[1]) as f32,
-                    (f64::from(s.origin[2]) - cam[2]) as f32,
-                ];
-                let c = Vec3::new(off[0] + 8.0, off[1] + 8.0, off[2] + 8.0);
-                if c.x * c.x + c.z * c.z > max_d2 || !sphere_visible(&planes, c, 14.0) {
-                    continue;
-                }
-                order.push((c.length_squared(), i, s.origin));
-                i += 1;
-            }
-        }
+        // Front-to-back for opaque (back-to-front for translucent below).
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         // Sky quads (sun, moon) and clouds, camera-relative.
@@ -1215,7 +1248,7 @@ impl TerrainRenderer {
             };
         let up_axis = Vec3::Z;
         let side = sun_dir.cross(up_axis).normalize();
-        if !p.underwater {
+        if !p.underwater && p.celestial {
             push_quad(
                 &mut qv,
                 sun_dir * 100.0,
@@ -1235,7 +1268,7 @@ impl TerrainRenderer {
         }
         let sky_quads = qv.len() as u32;
         let mut cloud_quads = 0;
-        if p.clouds && self.cloud_img.is_some() && !p.underwater {
+        if p.clouds && p.celestial && self.cloud_img.is_some() && !p.underwater {
             let h = 192.33 - cam[1] as f32;
             let size = (rd * 2.0).max(256.0) + 256.0;
             let scale = 12.0 * 256.0;
@@ -1442,6 +1475,7 @@ impl TerrainRenderer {
                 pass.draw_indexed(0..q * 6, 0, *inst..inst + 1);
             }
         }
+        self.draw_order = order;
         if overlay_n > 0 {
             pass.set_pipeline(&self.quad_blend);
             pass.set_bind_group(1, &self.overlay_bind, &[]);
@@ -1512,6 +1546,20 @@ pub fn look_to(f: Vec3, up: Vec3) -> Mat4 {
     )
 }
 
+/// Right-handed view matrix from a forward and a right vector.
+#[must_use]
+pub fn view_from_basis(f: Vec3, s: Vec3) -> Mat4 {
+    let f = f.normalize();
+    let s = s.normalize();
+    let u = s.cross(f);
+    Mat4::from_cols(
+        Vec4::new(s.x, u.x, -f.x, 0.0),
+        Vec4::new(s.y, u.y, -f.y, 0.0),
+        Vec4::new(s.z, u.z, -f.z, 0.0),
+        Vec4::W,
+    )
+}
+
 /// Right-handed perspective with a 0..1 depth range.
 #[must_use]
 pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
@@ -1542,4 +1590,31 @@ fn frustum_planes(m: Mat4) -> [Vec4; 6] {
 
 fn sphere_visible(planes: &[Vec4; 6], c: Vec3, r: f32) -> bool {
     planes.iter().all(|p| p.truncate().dot(c) + p.w >= -r)
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    fn view(yaw: f32, pitch: f32) -> Mat4 {
+        let (sy, cy) = yaw.to_radians().sin_cos();
+        let (sp, cp) = pitch.to_radians().sin_cos();
+        view_from_basis(Vec3::new(-sy * cp, -sp, cy * cp), Vec3::new(-cy, 0.0, -sy))
+    }
+
+    #[test]
+    fn straight_up_and_down_do_not_flip() {
+        for yaw in [0.0, 37.0, 180.0, 271.0] {
+            for (a, b) in [(89.9, 90.0), (90.0, 90.5), (-89.9, -90.0), (-90.0, -90.5)] {
+                let (m1, m2) = (view(yaw, a), view(yaw, b));
+                assert!(m2.is_finite());
+                let d = (m1 - m2)
+                    .to_cols_array()
+                    .iter()
+                    .map(|v| v.abs())
+                    .fold(0.0, f32::max);
+                assert!(d < 0.02, "yaw {yaw} pitch {a}->{b} jumped by {d}");
+            }
+        }
+    }
 }

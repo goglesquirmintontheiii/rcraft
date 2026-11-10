@@ -63,12 +63,15 @@ struct Variant {
     /// Reference to another event instead of a file.
     event: bool,
     attenuation: f32,
+    /// Long sounds (music, records) are streamed, never decoded whole.
+    stream: bool,
 }
 
 type Pcm = Arc<(u16, u32, Arc<[f32]>)>;
 
 struct Request {
     file: String,
+    stream: bool,
     volume: f32,
     pitch: f32,
     pan: (f32, f32),
@@ -106,6 +109,7 @@ fn parse_events(v: &serde_json::Value) -> AHashMap<String, Vec<Variant>> {
                     weight: 1,
                     event: false,
                     attenuation: 16.0,
+                    stream: false,
                 }),
                 serde_json::Value::Object(o) => Some(Variant {
                     file: o.get("name")?.as_str()?.to_owned(),
@@ -126,6 +130,7 @@ fn parse_events(v: &serde_json::Value) -> AHashMap<String, Vec<Variant>> {
                         .get("attenuation_distance")
                         .and_then(serde_json::Value::as_f64)
                         .unwrap_or(16.0) as f32,
+                    stream: o.get("stream").and_then(serde_json::Value::as_bool) == Some(true),
                 }),
                 _ => None,
             })
@@ -144,6 +149,59 @@ fn decode(bytes: Vec<u8>) -> Option<Pcm> {
     Some(Arc::new((ch, rate, samples.into())))
 }
 
+/// Decoded samples kept for short sounds: 8 M samples = 32 MB.
+const CACHE_SAMPLES: usize = 8 * 1024 * 1024;
+
+/// Plays cached samples without copying them.
+struct Shared {
+    data: Arc<[f32]>,
+    pos: usize,
+    channels: u16,
+    rate: u32,
+}
+
+impl Shared {
+    fn new(pcm: &Pcm) -> Self {
+        Self {
+            data: pcm.2.clone(),
+            pos: 0,
+            channels: pcm.0,
+            rate: pcm.1,
+        }
+    }
+}
+
+impl Iterator for Shared {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        let v = self.data.get(self.pos).copied();
+        self.pos += 1;
+        v
+    }
+}
+
+impl rodio::Source for Shared {
+    fn current_span_len(&self) -> Option<usize> {
+        Some(self.data.len().saturating_sub(self.pos)).filter(|n| *n > 0)
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        let frames = self.data.len() / usize::from(self.channels.max(1));
+        Some(std::time::Duration::from_secs_f64(
+            frames as f64 / f64::from(self.rate.max(1)),
+        ))
+    }
+}
+
 fn worker(rx: Receiver<Request>, files: Arc<AssetStack>) {
     let stream = match rodio::OutputStreamBuilder::open_default_stream() {
         Ok(mut s) => {
@@ -159,22 +217,40 @@ fn worker(rx: Receiver<Request>, files: Arc<AssetStack>) {
     };
     info!("audio output opened");
     let mut cache: AHashMap<String, Option<Pcm>> = AHashMap::new();
+    let mut cached_samples = 0usize;
     while let Ok(r) = rx.recv() {
-        let pcm = cache
-            .entry(r.file.clone())
-            .or_insert_with(|| {
-                let (ns, p) = r.file.split_once(':').unwrap_or(("minecraft", &r.file));
-                files
-                    .read(&format!("assets/{ns}/sounds/{p}.ogg"))
-                    .and_then(decode)
-            })
-            .clone();
-        let Some(pcm) = pcm else { continue };
-        let (ch, rate, data) = (&pcm.0, &pcm.1, &pcm.2);
-        let src = rodio::buffer::SamplesBuffer::new(*ch, *rate, data.to_vec())
+        let (ns, p) = r.file.split_once(':').unwrap_or(("minecraft", &r.file));
+        let path = format!("assets/{ns}/sounds/{p}.ogg");
+        if r.stream {
+            // Music: decode while playing from the compressed bytes (a few
+            // MB) instead of holding ~90 MB of samples per track (issue #2).
+            let Some(bytes) = files.read(&path) else {
+                continue;
+            };
+            let Ok(d) = rodio::Decoder::new(std::io::Cursor::new(bytes)) else {
+                continue;
+            };
+            stream.mixer().add(d.amplify(r.volume.clamp(0.0, 4.0)));
+            continue;
+        }
+        if !cache.contains_key(&r.file) {
+            let pcm = files.read(&path).and_then(decode);
+            cached_samples += pcm.as_ref().map_or(0, |p| p.2.len());
+            // Keep the decoded short-sound cache bounded (~32 MB).
+            if cached_samples > CACHE_SAMPLES {
+                cache.clear();
+                cached_samples = pcm.as_ref().map_or(0, |p| p.2.len());
+            }
+            cache.insert(r.file.clone(), pcm);
+        }
+        let Some(pcm) = cache.get(&r.file).cloned().flatten() else {
+            continue;
+        };
+        let ch = pcm.0;
+        let src = Shared::new(&pcm)
             .speed(r.pitch.clamp(0.5, 2.0))
             .amplify(r.volume.clamp(0.0, 4.0));
-        if *ch == 1 {
+        if ch == 1 {
             let out_ch = stream.config().channel_count();
             let mut vols = vec![r.pan.0; usize::from(out_ch.max(1))];
             if vols.len() >= 2 {
@@ -297,6 +373,7 @@ impl Audio {
             return;
         }
         let _ = tx.send(Request {
+            stream: v.stream || cat == Category::Music,
             file: v.file,
             volume: vol,
             pitch: pitch * v.pitch,

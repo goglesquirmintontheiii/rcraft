@@ -229,9 +229,28 @@ Issue #1 (feedback on 0.1.0) was worked first; every item is addressed below.
 
 ### Carried over to Phase 3
 Key rebinding; the remaining Phase 2 blocks, mobs and entities listed above;
-recipe book; status effects, enchantments and repair; moon phases; Anvil
-entity/POI import; Anvil benchmark; minisign verification; Nether/End
-features.
+recipe book; status effects, enchantments; anvil renaming (item
+components); beacons, lecterns, enchanting and brewing (need effects,
+enchantments and book data); moon phases; Anvil entity/POI import; Anvil
+benchmark; minisign verification; Nether/End features; the End dimension and
+its portal; faster noise sampling for worldgen.
+
+### Patch 0.2.1 (issue #2) `[x]`
+- [x] Startup crash from the Ultra preset's anisotropy option; options clamped
+      on load; safe mode resets options after a crash during startup
+- [x] Prism Launcher / PolyMC / MultiMC detection; Options → Minecraft Directory
+- [x] Item icons for block-entity items, tinted layered sprites, correct block
+      icon faces and shading; no magenta squares
+- [x] Smooth arm swing while holding attack; vanilla creative breaking timing
+- [x] Camera no longer flips at ±90° pitch; offhand hotbar slot and F to swap
+- [x] Pipelined world generation (full CPU use, ~150–200 chunks/s on a 9850X3D),
+      incremental streaming, column culling, O(1) chunk unloads
+- [x] Memory: streamed music, bounded sound cache, proportional memory guard
+- [x] Swimming and sprint-swimming, scaffolding placement and support
+- [x] Nether portals and Nether travel (one dimension streamed at a time)
+- [x] Anvil (repair), grindstone, stonecutter, smithing table
+- [x] Parity report: `docs/PARITY.md`
+- [x] Release 0.2.1
 
 ---
 
@@ -287,7 +306,7 @@ features.
 - [ ] **LOD rendering (Distant Horizons-like)**: hierarchical LOD columns generated
       from chunk data (and pre-generated beyond loaded chunks on a background
       worker), separate LOD mesh pipeline, fog blending, configurable LOD distance
-      (up to 4096 blocks), quality presets, persistent LOD cache per world
+      (up to 1024 chunks, ADR-021), quality presets, persistent LOD cache per world
 - [ ] Release 0.4.0
 
 ---

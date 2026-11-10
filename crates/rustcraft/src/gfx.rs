@@ -150,11 +150,28 @@ fn block_icon(models: &BlockModels, s: BlockStateId) -> Icon {
                 pts[k] = [0.5 + x1 * 0.625 * 1.12, 0.5 - y2 * 0.625 * 1.12];
                 depth += z2;
             }
+            // Rotated face normal: cull faces turned away from the viewer
+            // (at +Z) so only the three visible faces are drawn.
+            let n = match q.dir {
+                Dir::Up => [0.0, 1.0, 0.0],
+                Dir::Down => [0.0, -1.0, 0.0],
+                Dir::North => [0.0, 0.0, -1.0],
+                Dir::South => [0.0, 0.0, 1.0],
+                Dir::West => [-1.0, 0.0, 0.0],
+                Dir::East => [1.0, 0.0, 0.0],
+            };
+            let (nx1, nz1) = (n[0] * cy + n[2] * sy, -n[0] * sy + n[2] * cy);
+            let nz2 = n[1] * sx + nz1 * cx;
+            if nz2 < -1e-3 {
+                continue;
+            }
+            // Vanilla-like GUI lighting: top brightest, the left face a little
+            // darker, the right face darkest.
             let shade = match q.dir {
                 Dir::Up => 1.0,
-                Dir::Down => 0.4,
-                Dir::North | Dir::South => 0.8,
-                Dir::West | Dir::East => 0.6,
+                Dir::Down => 0.45,
+                _ if nx1 < 0.0 => 0.8,
+                _ => 0.6,
             };
             let c = if q.tint >= 0 { tint } else { [1.0; 3] };
             quads.push((
@@ -166,7 +183,7 @@ fn block_icon(models: &BlockModels, s: BlockStateId) -> Icon {
     if quads.is_empty() {
         return Icon::None;
     }
-    // Farthest first (larger z2 is farther from the viewer after rotation).
+    // Farthest first (the viewer is at +Z, so smaller z2 is farther).
     quads.sort_by(|a, b| a.0.total_cmp(&b.0));
     Icon::Block(quads.into_iter().map(|q| q.1).collect())
 }
@@ -290,6 +307,27 @@ impl Gfx {
                 format!("gui/sprites/container/{c}/burn_progress"),
             );
         }
+        for c in ["anvil", "grindstone", "stonecutter", "smithing"] {
+            extra(c.into(), format!("gui/container/{c}"));
+        }
+        for k in ["recipe", "recipe_selected", "recipe_highlighted"] {
+            extra(
+                format!("stonecutter_{k}"),
+                format!("gui/sprites/container/stonecutter/{k}"),
+            );
+        }
+        extra(
+            "anvil_error".into(),
+            "gui/sprites/container/anvil/error".into(),
+        );
+        extra(
+            "anvil_text_field_disabled".into(),
+            "gui/sprites/container/anvil/text_field_disabled".into(),
+        );
+        extra(
+            "hotbar_offhand_left".into(),
+            "gui/sprites/hud/hotbar_offhand_left".into(),
+        );
         extra(
             "tab_inventory".into(),
             "gui/container/creative_inventory/tab_inventory".into(),
@@ -322,9 +360,26 @@ impl Gfx {
         let mut item_imgs: Vec<(String, Image, Option<rc_assets::atlas::Animation>)> = Vec::new();
         let mut flat: Vec<(usize, String)> = Vec::new();
         for (i, name) in it.names.iter().enumerate() {
-            if let Some(tex) = flat_item_texture(&assets, name) {
-                flat.push((i, tex));
+            let Some(layers) = flat_item_layers(&assets, name) else {
+                continue;
+            };
+            let tinted = (0..layers.len()).any(|l| {
+                crate::item_tints::layer_tint(name, l) != crate::item_tints::LayerTint::None
+            });
+            if layers.len() > 1 || tinted {
+                // Layered / tinted sprite (spawn eggs, leather, potions…):
+                // composed once into a single icon.
+                let imgs: Vec<Image> = layers.iter().filter_map(|t| assets.png(t)).collect();
+                if imgs.len() == layers.len()
+                    && let Some(img) = crate::item_tints::compose(name, &imgs)
+                {
+                    let id = format!("rustcraft:icon/{name}");
+                    item_imgs.push((id.clone(), img, None));
+                    flat.push((i, id));
+                    continue;
+                }
             }
+            flat.push((i, layers[0].clone()));
         }
         if !assets.is_vanilla() {
             // Generated icons for items that are not blocks.
@@ -334,6 +389,45 @@ impl Gfx {
                     item_imgs.push((id.clone(), crate::fallback_tex::item_icon(name), None));
                     flat.push((i, id));
                 }
+            }
+        }
+        if assets.is_vanilla() {
+            // Items the game draws with a block-entity renderer get an icon
+            // rendered from the entity texture; anything else still without
+            // a picture gets a generated icon instead of a magenta square.
+            let has_flat: Vec<bool> = {
+                let mut v = vec![false; it.names.len()];
+                for (i, _) in &flat {
+                    v[*i] = true;
+                }
+                v
+            };
+            for (i, name) in it.names.iter().enumerate() {
+                if i == 0 || has_flat[i] {
+                    continue;
+                }
+                let block_ok = it.block[i].is_some_and(|b| match block_icon(&models, b) {
+                    Icon::Block(q) => !q.is_empty(),
+                    _ => false,
+                });
+                let entity = crate::entity_icons::icon(&assets, name);
+                if entity.is_none() && block_ok {
+                    continue;
+                }
+                let id = format!("rustcraft:icon/{name}");
+                let img = entity.unwrap_or_else(|| crate::fallback_tex::item_icon(name));
+                // Developer aid: RC_DUMP_ICONS=<dir> writes these icons out.
+                if let Some(dir) = std::env::var_os("RC_DUMP_ICONS") {
+                    let _ = image::save_buffer(
+                        std::path::Path::new(&dir).join(format!("{name}.png")),
+                        &img.px,
+                        img.w,
+                        img.h,
+                        image::ExtendedColorType::Rgba8,
+                    );
+                }
+                item_imgs.push((id.clone(), img, None));
+                flat.push((i, id));
             }
         }
         for (_, tex) in &flat {
@@ -417,10 +511,12 @@ impl Gfx {
             } else {
                 continue;
             };
-            let tint = it.block[*i].map_or([1.0; 4], |b| {
-                let c = tint_rgb(models.tints[b.0 as usize]);
-                [c[0], c[1], c[2], 1.0]
-            });
+            let tint = it.block[*i]
+                .filter(|_| !tex.starts_with("rustcraft:icon/"))
+                .map_or([1.0; 4], |b| {
+                    let c = tint_rgb(models.tints[b.0 as usize]);
+                    [c[0], c[1], c[2], 1.0]
+                });
             icons[*i] = Icon::Sprite(t, uv, tint);
             item_world[*i] = WorldIcon::Flat(if t == atlas_tex { 0 } else { etex.items }, uv, tint);
         }
@@ -446,6 +542,24 @@ impl Gfx {
             } else {
                 block_icon(&models, b)
             };
+        }
+        {
+            let missing: Vec<&str> = icons
+                .iter()
+                .enumerate()
+                .filter(|(i, ic)| {
+                    *i > 0
+                        && match ic {
+                            Icon::None => true,
+                            Icon::Block(q) => q.is_empty(),
+                            Icon::Sprite(..) => false,
+                        }
+                })
+                .map(|(i, _)| it.names[i].as_str())
+                .collect();
+            if !missing.is_empty() {
+                tracing::info!(count = missing.len(), items = ?missing, "items without an icon");
+            }
         }
         let grass_map = assets.png("minecraft:colormap/grass");
         let foliage_map = assets.png("minecraft:colormap/foliage");
@@ -561,29 +675,35 @@ impl Gfx {
     }
 }
 
-/// `layer0` texture if the item model is a flat (generated) sprite.
-fn flat_item_texture(assets: &Assets, name: &str) -> Option<String> {
+/// All `layerN` textures (bottom first) if the item model is a flat
+/// (generated) sprite.
+fn flat_item_layers(assets: &Assets, name: &str) -> Option<Vec<String>> {
     if !assets.is_vanilla() {
         return None;
     }
     let mut id = format!("minecraft:item/{name}");
-    let mut layer0: Option<String> = None;
+    let mut layers: Option<Vec<String>> = None;
     for _ in 0..8 {
         let b = assets.stack.read_id("models", &id, ".json")?;
         let v: serde_json::Value = serde_json::from_slice(&b).ok()?;
-        if layer0.is_none() {
-            layer0 = v["textures"]["layer0"].as_str().map(|s| {
-                if s.contains(':') {
+        if layers.is_none() && v["textures"]["layer0"].is_string() {
+            let mut out = Vec::new();
+            for i in 0..8 {
+                let Some(s) = v["textures"][format!("layer{i}")].as_str() else {
+                    break;
+                };
+                out.push(if s.contains(':') {
                     s.to_owned()
                 } else {
                     format!("minecraft:{s}")
-                }
-            });
+                });
+            }
+            layers = Some(out);
         }
         let parent = v["parent"].as_str()?;
         let p = parent.strip_prefix("minecraft:").unwrap_or(parent);
         if p == "item/generated" || p == "item/handheld" || p == "builtin/generated" {
-            return layer0;
+            return layers;
         }
         if p.starts_with("block/") || p.starts_with("builtin/") {
             return None;

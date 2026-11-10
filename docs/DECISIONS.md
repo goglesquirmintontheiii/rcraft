@@ -133,3 +133,50 @@ Decided 2026-11-02 (Phase 2), extends ADR-005. Sounds are read from the
 launcher's hashed object store via the 1.21.1 asset index; entity, weather
 and skin textures from the jar. With no install the game is silent and uses
 procedurally generated stand-ins (`fallback_tex.rs`), never Mojang files.
+
+## ADR-023 No anisotropic filtering; options are clamped and startup is guarded
+Decided 2026-11-10 (0.2.1, issue #2). wgpu requires every filter to be
+linear when anisotropy is above 1, but block textures use nearest
+magnification to stay pixel-sharp; the Ultra preset's anisotropy 8 made
+sampler creation a validation error, so every launch crashed until the data
+folder was deleted. Anisotropy is now always 1 (the field stays in
+`options.json` for compatibility). Options are clamped to valid ranges when
+loaded, and a `startup.lock` marker detects a crash before the first frame:
+the next launch sets `options.json` aside as `options.crashed.json` and
+starts with defaults.
+
+## ADR-024 Pipelined world generation and incremental streaming
+Decided 2026-11-10 (0.2.1, issue #2). Carving (noise, surface, carvers;
+~95 % of generation time, independent per chunk) is submitted to the worker
+pool continuously, nearest targets first, with at most 2×threads+2 in flight
+so lighting and meshing keep getting workers. The generation thread only
+decorates (sequential, since features write into neighbours) and exports.
+On the main thread the O(r²) request/unload scans run only when the player
+changes chunk or the render distance changes, lighting/meshing candidates
+come from a work set instead of every loaded chunk, disk loads are fed to the
+pool a bounded number at a time, and the renderer indexes sections by chunk
+column for culling and unloading. Measured with `--scene bench`.
+
+## ADR-025 One dimension streamed at a time
+Decided 2026-11-10 (0.2.1). A world folder keeps each dimension's regions in
+`dim/<name>/`, and the world header's `dimension` field records where the
+player is. Changing dimension saves, then reopens the world for the target
+dimension; arrival finds the nearest portal or builds one. Multiplayer
+(Phase 4) will need all dimensions live at once and will revisit this.
+
+## ADR-026 Music streams; the short-sound cache is bounded
+Decided 2026-11-10 (0.2.1, issue #2). Music and other `stream: true` sounds
+are decoded while playing from their compressed bytes instead of being
+decoded whole into f32 samples (~90 MB per track, previously cached forever
+and copied again for playback). Short sounds play from a shared sample buffer
+without copying, and the decoded cache is cleared above 8 M samples (32 MB).
+
+## ADR-027 Memory guard scales the view distance proportionally
+Decided 2026-11-10 (0.2.1, issue #2), refines ADR-021. Process memory before
+the world opens is the fixed part (GPU driver, assets: ~300–380 MiB). When
+measured memory exceeds the limit by 3 %, the render distance is scaled by
+the square root of (limit − fixed) / (used − fixed), and the guard waits six
+seconds for unloads to land before measuring again. The up-front estimate
+is ~380 MiB fixed + ~0.15 MiB per loaded chunk (measured with
+`--scene bench`). Limits below roughly 450 MiB leave room for only the
+minimum render distance.

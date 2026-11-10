@@ -41,6 +41,10 @@ pub enum Screen {
         text: String,
     },
     Sounds,
+    /// Options → Minecraft Directory: where the player's own assets come from.
+    MinecraftDir {
+        path: String,
+    },
     Options,
     Video,
     Performance,
@@ -264,6 +268,12 @@ impl Screen {
                     ("Controls...", Screen::Controls),
                     ("Updates...", Screen::Updates),
                     ("Music & Sounds...", Screen::Sounds),
+                    (
+                        "Minecraft Directory...",
+                        Screen::MinecraftDir {
+                            path: cx.opts.minecraft_dir.clone().unwrap_or_default(),
+                        },
+                    ),
                 ];
                 for (i, (l, s)) in items.into_iter().enumerate() {
                     let (x, y) = slot(ui, i + 2);
@@ -271,12 +281,13 @@ impl Screen {
                         out.push(Action::Push(s));
                     }
                 }
-                let (x, y) = slot(ui, 7);
-                ui.button("Resource Packs... (v0.3)", x, y + 24.0, 150.0, 20.0, false);
                 let (x, y) = slot(ui, 8);
+                ui.button("Resource Packs... (v0.3)", x, y + 24.0, 150.0, 20.0, false);
+                let (x, y) = slot(ui, 9);
                 ui.button("Language... (English)", x, y + 24.0, 150.0, 20.0, false);
                 done_button(ui, &mut out);
             }
+            Screen::MinecraftDir { path } => minecraft_dir(ui, cx, &mut out, in_world, path),
             Screen::Video => video(ui, cx, &mut out, in_world),
             Screen::Performance => performance(ui, cx, &mut out, in_world),
             Screen::Controls => {
@@ -304,6 +315,7 @@ impl Screen {
                     ("Attack / Destroy", "Left Button"),
                     ("Use Item / Place Block", "Right Button"),
                     ("Pick Block", "Middle Button"),
+                    ("Swap Item With Offhand", "F"),
                     ("Inventory", "E"),
                     ("Chat / Command", "T  /  /"),
                     ("Hotbar", "1-9, Mouse Wheel"),
@@ -841,6 +853,89 @@ fn video(ui: &mut Ui<'_>, cx: &mut Ctx<'_>, out: &mut Vec<Action>, in_world: boo
     done_button(ui, out);
 }
 
+/// Options → Minecraft Directory. The player can paste a folder (Ctrl+V) or
+/// leave it empty to auto-detect the vanilla launcher, Prism Launcher,
+/// PolyMC or MultiMC.
+fn minecraft_dir(
+    ui: &mut Ui<'_>,
+    cx: &mut Ctx<'_>,
+    out: &mut Vec<Action>,
+    in_world: bool,
+    path: &mut String,
+) {
+    ui.background(in_world);
+    header(ui, "Minecraft Directory");
+    let w = ui.w;
+    ui.text_centered(
+        "Folder with your own Minecraft 1.21.1 install (textures and sounds):",
+        w / 2.0,
+        34.0,
+        GRAY,
+    );
+    let enter = ui.text_field(
+        "mcdir",
+        w / 2.0 - 155.0,
+        48.0,
+        310.0,
+        20.0,
+        path,
+        1024,
+        "Auto-detect (leave empty)",
+    );
+    let apply = |cx: &mut Ctx<'_>, out: &mut Vec<Action>, p: &str| {
+        let p = p.trim().trim_matches('"').trim();
+        cx.opts.minecraft_dir = (!p.is_empty()).then(|| p.to_owned());
+        out.push(Action::OptionsChanged {
+            reload_world: false,
+            reload_assets: true,
+        });
+    };
+    if ui.button("Apply", w / 2.0 - 155.0, 74.0, 150.0, 20.0, true) || enter {
+        apply(cx, out, path);
+    }
+    if ui.button("Auto-detect", w / 2.0 + 5.0, 74.0, 150.0, 20.0, true) {
+        path.clear();
+        apply(cx, out, "");
+    }
+    let status = match &cx.gfx.assets.origin {
+        rc_assets::Origin::Vanilla(p) => format!("Using: {}", p.display()),
+        rc_assets::Origin::Fallback => {
+            "Not found: using the built-in textures, no sounds".to_owned()
+        }
+    };
+    let mut s = status;
+    while ui.font.width(&s) > w - 20.0 && s.chars().count() > 4 {
+        // Keep the end of long paths visible.
+        let cut: String = s.chars().skip(8).collect();
+        s = format!("...{cut}");
+    }
+    ui.text_centered(&s, w / 2.0, 104.0, WHITE);
+    if let rc_assets::Origin::Vanilla(p) = &cx.gfx.assets.origin
+        && let Some(v) = p.parent().and_then(|d| d.file_name())
+        && v.to_string_lossy() != "1.21.1"
+        && v.to_string_lossy().starts_with("1.")
+    {
+        ui.text_centered(
+            &format!(
+                "Found Minecraft {}: launch 1.21.1 once for the exact textures",
+                v.to_string_lossy()
+            ),
+            w / 2.0,
+            92.0,
+            [1.0, 0.85, 0.3, 1.0],
+        );
+    }
+    let tips = [
+        "Accepted: a .minecraft folder, a Prism Launcher / PolyMC /",
+        "MultiMC data folder, or one of their instance folders.",
+        "Ctrl+V pastes. Minecraft 1.21.1 must have been launched once.",
+    ];
+    for (i, t) in tips.iter().enumerate() {
+        ui.text_centered(t, w / 2.0, 122.0 + i as f32 * 11.0, GRAY);
+    }
+    done_button(ui, out);
+}
+
 fn performance(ui: &mut Ui<'_>, cx: &mut Ctx<'_>, out: &mut Vec<Action>, in_world: bool) {
     ui.background(in_world);
     header(ui, "Performance");
@@ -905,6 +1000,7 @@ fn performance(ui: &mut Ui<'_>, cx: &mut Ctx<'_>, out: &mut Vec<Action>, in_worl
                 v => format!("{v} fps"),
             }
         ),
+        "About 380 MB is the game itself; the rest of the limit holds chunks.".to_owned(),
         "Generation, lighting and meshing run on the worker pool;".to_owned(),
         "the render thread is never blocked by chunk work.".to_owned(),
     ];
@@ -1046,6 +1142,27 @@ pub fn hud(ui: &mut Ui<'_>, cx: &mut Ctx<'_>) {
             draw_stack(ui, cx.gfx, s, hx + 3.0 + i as f32 * 20.0, hy + 3.0);
         }
     }
+    // Offhand slot, left of the hotbar, only while it holds something.
+    if let Some(s) = g
+        .inv
+        .slots
+        .get(crate::items::OFFHAND_SLOT)
+        .copied()
+        .flatten()
+    {
+        let (ox, oy) = (hx - 29.0, h - 23.0);
+        match t.extra.get("hotbar_offhand_left") {
+            Some(sp) => ui.sprite(sp, ox, oy, 29.0, 24.0, WHITE),
+            None => {
+                ui.fill(ox, oy + 1.0, 22.0, 22.0, [0.0, 0.0, 0.0, 0.55]);
+                ui.fill(ox, oy + 1.0, 22.0, 1.0, [0.6, 0.6, 0.6, 0.8]);
+                ui.fill(ox, oy + 22.0, 22.0, 1.0, [0.6, 0.6, 0.6, 0.8]);
+                ui.fill(ox, oy + 1.0, 1.0, 22.0, [0.6, 0.6, 0.6, 0.8]);
+                ui.fill(ox + 21.0, oy + 1.0, 1.0, 22.0, [0.6, 0.6, 0.6, 0.8]);
+            }
+        }
+        draw_stack(ui, cx.gfx, s, ox + 3.0, oy + 4.0);
+    }
     // Selected item name.
     let since = g.tick.saturating_sub(cx.selected_changed_tick);
     if since < 40
@@ -1062,9 +1179,37 @@ pub fn hud(ui: &mut Ui<'_>, cx: &mut Ctx<'_>) {
         ui.text_centered(&name, w / 2.0, y, [1.0, 1.0, 1.0, a]);
     }
     if g.player.mode == GameMode::Survival {
-        // XP bar (empty in this version).
-        if let Some(s) = t.xp_background {
-            ui.sprite(&s, hx, h - 29.0, 182.0, 5.0, WHITE);
+        // XP bar and level (green number with a dark outline, like vanilla).
+        let prog = g.player.xp_progress.clamp(0.0, 1.0);
+        match t.xp_background {
+            Some(s) => ui.sprite(&s, hx, h - 29.0, 182.0, 5.0, WHITE),
+            None => ui.fill(hx, h - 29.0, 182.0, 5.0, [0.0, 0.0, 0.0, 0.6]),
+        }
+        let pw = (182.0 * prog).floor();
+        if pw > 0.0 {
+            match t.xp_progress {
+                Some(mut s) => {
+                    s.uv = [
+                        s.uv[0],
+                        s.uv[1],
+                        s.uv[0] + (s.uv[2] - s.uv[0]) * pw / 182.0,
+                        s.uv[3],
+                    ];
+                    s.border = 0.0;
+                    ui.sprite(&s, hx, h - 29.0, pw, 5.0, WHITE);
+                }
+                None => ui.fill(hx, h - 28.0, pw, 3.0, [0.5, 1.0, 0.13, 1.0]),
+            }
+        }
+        if g.player.xp_level > 0 {
+            let lv = g.player.xp_level.to_string();
+            let (cx, cy) = (w / 2.0, h - 35.0);
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                let lw = ui.font.width(&lv);
+                ui.text_plain(&lv, cx - lw / 2.0 + dx, cy + dy, [0.0, 0.0, 0.0, 1.0]);
+            }
+            let lw = ui.font.width(&lv);
+            ui.text_plain(&lv, cx - lw / 2.0, cy, [0.5, 1.0, 0.13, 1.0]);
         }
         let hp = g.player.health.ceil() as i32;
         let blink = g.player.hurt_time > 0 && (g.player.hurt_time / 3) % 2 == 1;

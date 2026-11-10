@@ -40,6 +40,18 @@ impl Tab {
         Tab::Functional,
         Tab::Redstone,
     ];
+    pub const ALL: [Tab; 10] = [
+        Tab::Building,
+        Tab::Colored,
+        Tab::Natural,
+        Tab::Functional,
+        Tab::Redstone,
+        Tab::Tools,
+        Tab::Combat,
+        Tab::Food,
+        Tab::Ingredients,
+        Tab::SpawnEggs,
+    ];
     pub const BOTTOM: [Tab; 5] = [
         Tab::Tools,
         Tab::Combat,
@@ -675,6 +687,9 @@ impl Stack {
 }
 
 pub const MAIN: usize = 36;
+/// Inventory index of the offhand slot.
+pub const OFFHAND_SLOT: usize = 40;
+
 /// 36..40 armour (feet, legs, chest, head), 40 offhand.
 pub const SLOTS: usize = 41;
 

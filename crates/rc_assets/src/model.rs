@@ -468,7 +468,16 @@ fn bake_raw(r: &Resolved, rx: u32, ry: u32, uvlock: bool) -> Vec<RawQuad> {
     };
     for e in elements {
         for (d, face) in &e.faces {
-            let Some(tex) = resolve_texture(&r.textures, &face.texture) else {
+            // A face's texture is always a variable reference; the `#` is
+            // optional (1.21's heavy_core model writes plain "all").
+            let reference = if face.texture.starts_with('#') {
+                std::borrow::Cow::Borrowed(face.texture.as_str())
+            } else {
+                std::borrow::Cow::Owned(format!("#{}", face.texture))
+            };
+            let Some(tex) = resolve_texture(&r.textures, &reference)
+                .or_else(|| resolve_texture(&r.textures, &face.texture))
+            else {
                 continue;
             };
             let mut corners = face_corners(*d, e.from, e.to);
@@ -791,6 +800,20 @@ impl BlockModels {
                 .filter_map(|n| load_texture(assets, n).map(|(i, a)| (n.clone(), i, a)))
                 .collect()
         };
+        if loaded.len() < names.len() {
+            let missing: Vec<&String> = names
+                .iter()
+                .filter(|n| !loaded.iter().any(|(l, _, _)| l == *n))
+                .collect();
+            let users: Vec<&String> = raw_models
+                .iter()
+                .zip(&model_names)
+                .filter(|((q, _), _)| q.iter().any(|q| missing.contains(&&q.texture)))
+                .map(|(_, n)| n)
+                .take(20)
+                .collect();
+            warn!(?missing, ?users, "block textures not found");
+        }
         let atlas = atlas::build(loaded, mip_levels);
         Self::finish(
             atlas,

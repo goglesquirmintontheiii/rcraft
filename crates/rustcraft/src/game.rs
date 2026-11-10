@@ -14,6 +14,11 @@ use crate::particles::Particles;
 use crate::player::{GameMode, Hit, MoveInput, Player, outline_boxes};
 use crate::world::World;
 
+/// Length of the arm swing animation in ticks.
+pub const SWING_TICKS: u32 = 6;
+/// Ticks between blocks broken while holding attack in creative mode.
+const CREATIVE_BREAK_DELAY: u32 = 5;
+
 /// Input sampled for one tick.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TickInput {
@@ -69,9 +74,24 @@ pub struct SoundOut {
 /// An open block GUI.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Container {
-    Crafting { pos: BlockPos },
-    Chest { pos: BlockPos },
-    Furnace { pos: BlockPos },
+    Crafting {
+        pos: BlockPos,
+    },
+    Chest {
+        pos: BlockPos,
+    },
+    Furnace {
+        pos: BlockPos,
+    },
+    /// Anvil, grindstone, stonecutter or smithing table; inputs are in
+    /// `Game::craft`. `selected` is the chosen stonecutter recipe.
+    Station {
+        pos: BlockPos,
+        kind: crate::stations::Station,
+        selected: Option<usize>,
+        /// First visible stonecutter row.
+        scroll: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -135,6 +155,15 @@ pub struct Game {
     pub flash: u32,
     pub difficulty: Difficulty,
     music_timer: u32,
+    /// Ticks spent standing in a nether portal.
+    portal_ticks: u32,
+    /// After a portal trip: ticks before portals work again (must step out).
+    pub portal_cooldown: u32,
+    /// Set when the player should change dimension: (dimension, position).
+    pub wants_dimension: Option<(String, [f64; 3])>,
+    /// Just came through a portal: find or build one at the destination
+    /// once the chunks are in.
+    pub arriving: bool,
     step_accum: f32,
 }
 
@@ -169,6 +198,36 @@ pub fn replaceable(s: BlockStateId) -> bool {
                 | "glow_lichen"
                 | "fire"
         ) && !(name == "snow" && b.get(s, "layers").is_some_and(|l| l != "1"))
+}
+
+/// Scaffolding support distance at `p` (0 = on a solid block, +1 per block
+/// sideways, 7 = unsupported).
+fn scaffolding_distance(w: &World, p: BlockPos) -> u32 {
+    let b = rc_data::blocks();
+    let dist = |s: BlockStateId| {
+        (name_of(s) == "scaffolding").then(|| {
+            b.get(s, "distance")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(7)
+        })
+    };
+    let below = w.get_block(BlockPos::new(p.x, p.y - 1, p.z));
+    if let Some(d) = dist(below) {
+        return d;
+    }
+    if b.collision(below)
+        .iter()
+        .any(|c| c[4] >= 1.0 && c[0] <= 0.0 && c[3] >= 1.0)
+    {
+        return 0;
+    }
+    let mut best = 7;
+    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        if let Some(d) = dist(w.get_block(BlockPos::new(p.x + dx, p.y, p.z + dz))) {
+            best = best.min(d + 1);
+        }
+    }
+    best.min(7)
 }
 
 fn is_falling(s: BlockStateId) -> bool {
@@ -257,6 +316,10 @@ impl Game {
             flash: 0,
             difficulty,
             music_timer: 600,
+            portal_ticks: 0,
+            portal_cooldown: 0,
+            wants_dimension: None,
+            arriving: false,
             step_accum: 0.0,
         }
     }
@@ -591,6 +654,7 @@ impl Game {
             let was_in_water = self.player.in_water;
             let fall_speed = self.player.vel[1];
             self.player.tick(&input.mv, &self.world);
+            self.portal_check();
             if self.player.in_water && !was_in_water && fall_speed < -0.2 {
                 let pos = self.player.pos;
                 let uv = crate::PARTICLE_SPRITES.with(|p| {
@@ -878,7 +942,7 @@ impl Game {
         if input.attack_pressed
             && let Some(i) = self.target_entity
         {
-            self.swing = 6;
+            self.swing_arm(true);
             if self.attack_cooldown == 0 {
                 self.attack_cooldown = 10;
                 let dmg = 1.0
@@ -927,16 +991,20 @@ impl Game {
         // Breaking.
         match (input.attack, self.target) {
             (true, Some(hit)) => {
-                self.swing = 6;
+                // Holding the button loops the swing instead of restarting it
+                // every tick (that restart was the hand "twitch", issue #2).
+                self.swing_arm(input.attack_pressed);
                 let s = self.world.get_block(hit.pos);
                 if self.player.mode == GameMode::Creative {
                     let sword = self
                         .inv
                         .held()
                         .is_some_and(|st| items().name(st.item).ends_with("_sword"));
-                    if self.break_cooldown == 0 && !sword {
+                    // Like vanilla: every click breaks at once; holding the
+                    // button repeats every 5 ticks, so fast clicking is quicker.
+                    if !sword && (input.attack_pressed || self.break_cooldown == 0) {
                         self.break_block(hit.pos, false);
-                        self.break_cooldown = 6;
+                        self.break_cooldown = CREATIVE_BREAK_DELAY;
                     }
                     self.breaking = None;
                 } else if let Some(ticks) = items::break_ticks(
@@ -1004,6 +1072,15 @@ impl Game {
             [0.55, 0.75, 0.35]
         } else {
             [1.0; 3]
+        }
+    }
+
+    /// Start the arm swing. A new press may restart a swing that is at least
+    /// half done; a held button only starts the next one when it finishes,
+    /// so the hand moves smoothly instead of jittering.
+    pub fn swing_arm(&mut self, fresh_press: bool) {
+        if self.swing == 0 || (fresh_press && self.swing <= SWING_TICKS / 2) {
+            self.swing = SWING_TICKS;
         }
     }
 
@@ -1119,6 +1196,212 @@ impl Game {
         }
     }
 
+    /// Recompute a scaffolding block's support distance; unsupported
+    /// scaffolding (distance 7) drops as an item (minecraft.wiki
+    /// "Scaffolding").
+    fn scaffolding_tick(&mut self, p: BlockPos, s: BlockStateId) {
+        let b = rc_data::blocks();
+        let d = scaffolding_distance(&self.world, p);
+        if d >= 7 {
+            self.world.set_block(p, BlockStateId::AIR);
+            self.neighbours_changed(p);
+            if let Some(it) = items().id("scaffolding") {
+                self.drop_item(
+                    Stack::new(it, 1),
+                    [
+                        f64::from(p.x) + 0.5,
+                        f64::from(p.y) + 0.5,
+                        f64::from(p.z) + 0.5,
+                    ],
+                );
+            }
+            return;
+        }
+        let below = self.world.get_block(BlockPos::new(p.x, p.y - 1, p.z));
+        let bottom = d > 0 && name_of(below) != "scaffolding";
+        let ns = b.with(
+            b.with(s, "distance", &d.to_string()),
+            "bottom",
+            if bottom { "true" } else { "false" },
+        );
+        if ns != s {
+            self.set_block(p, ns);
+        }
+    }
+
+    /// Where scaffolding goes when used on scaffolding (minecraft.wiki
+    /// "Scaffolding", Java): on the top face it extends horizontally the way
+    /// the player faces; on any other face it goes on top of the column.
+    /// Sneaking places it against the clicked face like a normal block.
+    fn scaffolding_target(&self, hit: Hit) -> Option<BlockPos> {
+        let clicked = self.world.get_block(hit.pos);
+        if self.player.sneaking || name_of(clicked) != "scaffolding" {
+            return None;
+        }
+        let w = &self.world;
+        if hit.normal == [0, 1, 0] {
+            let yaw = self.player.yaw.rem_euclid(360.0);
+            let (dx, dz) = match ((yaw + 45.0) / 90.0) as i32 % 4 {
+                0 => (0, 1),
+                1 => (-1, 0),
+                2 => (0, -1),
+                _ => (1, 0),
+            };
+            let mut t = hit.pos;
+            for _ in 0..7 {
+                t = BlockPos::new(t.x + dx, t.y, t.z + dz);
+                let s = w.get_block(t);
+                if name_of(s) == "scaffolding" {
+                    continue;
+                }
+                return replaceable(s).then_some(t);
+            }
+            None
+        } else {
+            let mut t = hit.pos;
+            while t.y < 319 {
+                t = BlockPos::new(t.x, t.y + 1, t.z);
+                let s = w.get_block(t);
+                if name_of(s) != "scaffolding" {
+                    return replaceable(s).then_some(t);
+                }
+            }
+            None
+        }
+    }
+
+    /// Standing in a nether portal: after 80 ticks (1 in creative) ask the
+    /// engine for a dimension change.
+    fn portal_check(&mut self) {
+        if self.arriving {
+            // Hold still until the search area is loaded.
+            let c = self.player_chunk();
+            let r = 2;
+            let ready = (-r..=r).all(|dx| {
+                (-r..=r).all(|dz| {
+                    self.world
+                        .is_loaded(BlockPos::new((c.x + dx) * 16, 0, (c.z + dz) * 16))
+                })
+            });
+            if !ready {
+                self.player.pos = self.player.prev_pos;
+                self.player.vel = [0.0; 3];
+                return;
+            }
+            self.arrive();
+        }
+        let bb = self.player.aabb();
+        let mut inside = false;
+        'scan: for x in bb.min[0].floor() as i32..=bb.max[0].floor() as i32 {
+            for y in bb.min[1].floor() as i32..=bb.max[1].floor() as i32 {
+                for z in bb.min[2].floor() as i32..=bb.max[2].floor() as i32 {
+                    if name_of(self.world.get_block(BlockPos::new(x, y, z))) == "nether_portal" {
+                        inside = true;
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        if !inside {
+            self.portal_ticks = 0;
+            self.portal_cooldown = self.portal_cooldown.saturating_sub(1);
+            return;
+        }
+        if self.portal_cooldown > 0 {
+            return;
+        }
+        self.portal_ticks += 1;
+        if self.portal_ticks == 1 {
+            self.sound(
+                "block.portal.trigger",
+                Some(self.player.pos),
+                0.25,
+                1.0,
+                rc_audio::Category::Ambient,
+            );
+        }
+        let wait = if self.player.mode == GameMode::Survival {
+            80
+        } else {
+            1
+        };
+        if self.portal_ticks >= wait
+            && let Some((dim, pos)) =
+                crate::portal::destination(self.world.dimension, self.player.pos)
+        {
+            self.portal_ticks = 0;
+            self.wants_dimension = Some((dim.to_owned(), pos));
+        }
+    }
+
+    /// Place the player in the nearest portal around them, building one if
+    /// there is none (vanilla searches 16 blocks in the Nether, 128 in the
+    /// Overworld; here the search covers the loaded area up to that).
+    fn arrive(&mut self) {
+        let p = BlockPos::new(
+            self.player.pos[0].floor() as i32,
+            self.player.pos[1].floor() as i32,
+            self.player.pos[2].floor() as i32,
+        );
+        let r = if self.world.dimension == rc_worldgen::Dimension::Nether {
+            16
+        } else {
+            48
+        };
+        let base = match crate::portal::find_portal_near(&self.world, p, r) {
+            Some(q) => q,
+            None => {
+                let site = crate::portal::site_for_new_portal(&self.world, p);
+                tracing::info!(?p, ?site, dim = ?self.world.dimension, "building a portal");
+                for (q, st) in crate::portal::build_portal(site) {
+                    self.set_block(q, st);
+                }
+                site
+            }
+        };
+        self.player.pos = [
+            f64::from(base.x) + 0.5,
+            f64::from(base.y),
+            f64::from(base.z) + 0.5,
+        ];
+        self.player.prev_pos = self.player.pos;
+        self.player.vel = [0.0; 3];
+        self.player.fall_distance = 0.0;
+        self.portal_cooldown = 20;
+        self.arriving = false;
+        self.sound(
+            "block.portal.travel",
+            None,
+            0.25,
+            1.0,
+            rc_audio::Category::Ambient,
+        );
+    }
+
+    /// Light a portal if fire at `p` would complete one. Returns whether it lit.
+    fn try_light_portal(&mut self, p: BlockPos) -> bool {
+        let Some(frame) = crate::portal::frame_for_fire(&self.world, p) else {
+            return false;
+        };
+        let b = rc_data::blocks();
+        let st = b.with(b.default_state("nether_portal"), "axis", frame.axis);
+        for q in frame.cells() {
+            self.set_block(q, st);
+        }
+        self.sound(
+            "block.portal.trigger",
+            Some([
+                f64::from(p.x) + 0.5,
+                f64::from(p.y) + 0.5,
+                f64::from(p.z) + 0.5,
+            ]),
+            0.5,
+            1.0,
+            rc_audio::Category::Blocks,
+        );
+        true
+    }
+
     fn falling_check(&mut self, p: BlockPos) {
         let s = self.world.get_block(p);
         if !is_falling(s) {
@@ -1185,6 +1468,17 @@ impl Game {
             }
             if is_falling(s) {
                 self.falling_check(p);
+                continue;
+            }
+            if name_of(s) == "scaffolding" {
+                self.scaffolding_tick(p, s);
+                continue;
+            }
+            if name_of(s) == "nether_portal" {
+                if !crate::portal::portal_block_valid(&self.world, p, s) {
+                    self.world.set_block(p, BlockStateId::AIR);
+                    self.neighbours_changed(p);
+                }
                 continue;
             }
             if let Some(ns) = blocklogic::leaf_distance(&self.world, p) {
@@ -1337,6 +1631,12 @@ impl Game {
             || matches!(
                 n,
                 "crafting_table"
+                    | "anvil"
+                    | "chipped_anvil"
+                    | "damaged_anvil"
+                    | "grindstone"
+                    | "stonecutter"
+                    | "smithing_table"
                     | "chest"
                     | "trapped_chest"
                     | "barrel"
@@ -1393,12 +1693,22 @@ impl Game {
                 1.0,
                 rc_audio::Category::Blocks,
             );
-            self.swing = 6;
+            self.swing_arm(true);
             return true;
         }
         match n {
             "crafting_table" => {
                 self.container = Some(Container::Crafting { pos: p });
+                return true;
+            }
+            _ if crate::stations::Station::for_block(n).is_some() => {
+                let kind = crate::stations::Station::for_block(n).expect("station");
+                self.container = Some(Container::Station {
+                    pos: p,
+                    kind,
+                    selected: None,
+                    scroll: 0,
+                });
                 return true;
             }
             "furnace" | "blast_furnace" | "smoker" => {
@@ -1490,7 +1800,7 @@ impl Game {
             if !creative {
                 self.inv.consume_held();
             }
-            self.swing = 6;
+            self.swing_arm(true);
             return;
         }
         if m.kind == MobKind::Sheep && held_name == "shears" && !m.sheared && !m.baby {
@@ -1522,7 +1832,7 @@ impl Game {
                     rc_audio::Category::Players,
                 );
             }
-            self.swing = 6;
+            self.swing_arm(true);
             return;
         }
         if let Some(d) = held_name.strip_suffix("_dye")
@@ -1556,7 +1866,7 @@ impl Game {
                 1.0,
                 rc_audio::Category::Players,
             );
-            self.swing = 6;
+            self.swing_arm(true);
         }
     }
 
@@ -1737,7 +2047,7 @@ impl Game {
                         1.0,
                         rc_audio::Category::Blocks,
                     );
-                    self.swing = 6;
+                    self.swing_arm(true);
                 }
                 return;
             }
@@ -1761,7 +2071,7 @@ impl Game {
                     if !creative {
                         self.inv.damage_held(1);
                     }
-                    self.swing = 6;
+                    self.swing_arm(true);
                 }
                 return;
             }
@@ -1778,7 +2088,7 @@ impl Game {
                     if !creative {
                         self.inv.damage_held(1);
                     }
-                    self.swing = 6;
+                    self.swing_arm(true);
                 }
                 return;
             }
@@ -1803,14 +2113,31 @@ impl Game {
                         if !creative {
                             self.inv.damage_held(1);
                         }
-                        self.swing = 6;
+                        self.swing_arm(true);
                     }
                 }
                 return;
             }
-            "flint_and_steel" => {
+            "flint_and_steel" | "fire_charge" => {
                 if replaceable(self.world.get_block(adj)) && !b.collision(clicked).is_empty() {
-                    self.set_block(adj, b.default_state("fire"));
+                    let lit = self.try_light_portal(adj);
+                    if !lit {
+                        self.set_block(adj, b.default_state("fire"));
+                    }
+                    if name == "fire_charge" {
+                        self.sound(
+                            "item.firecharge.use",
+                            Some(self.player.pos),
+                            1.0,
+                            1.0,
+                            rc_audio::Category::Blocks,
+                        );
+                        if !creative {
+                            self.inv.consume_held();
+                        }
+                        self.swing_arm(true);
+                        return;
+                    }
                     self.sound(
                         "item.flintandsteel.use",
                         Some(self.player.pos),
@@ -1846,7 +2173,7 @@ impl Game {
                 if !creative {
                     self.inv.consume_held();
                 }
-                self.swing = 6;
+                self.swing_arm(true);
             }
             return;
         }
@@ -1882,10 +2209,27 @@ impl Game {
             if self.player.mode != GameMode::Creative {
                 self.inv.consume_held();
             }
-            self.swing = 6;
+            self.swing_arm(true);
             return;
         }
-        let p = if replaceable(clicked)
+        let scaffold_target = if it_name == "scaffolding" {
+            self.scaffolding_target(hit)
+        } else {
+            None
+        };
+        let p = if let Some(t) = scaffold_target {
+            t
+        } else if name_of(clicked) == "scaffolding" && it_name == "scaffolding" {
+            // Used on scaffolding with nowhere to go.
+            if !self.player.sneaking {
+                return;
+            }
+            BlockPos::new(
+                hit.pos.x + hit.normal[0],
+                hit.pos.y + hit.normal[1],
+                hit.pos.z + hit.normal[2],
+            )
+        } else if replaceable(clicked)
             && clicked != BlockStateId::AIR
             && b.fluid(clicked).is_empty()
         {
@@ -1948,6 +2292,34 @@ impl Game {
         }
         if n.ends_with("leaves") {
             state = b.with(state, "persistent", "true");
+        }
+        if n == "scaffolding" {
+            let d = scaffolding_distance(&self.world, p);
+            if d >= 7 {
+                // Too far from support: it falls (only one past the limit).
+                if self.player.mode != GameMode::Creative {
+                    self.inv.consume_held();
+                }
+                self.entities.spawn(Entity::new(
+                    Kind::Falling {
+                        state: b.with(state, "distance", "7").0,
+                    },
+                    [f64::from(p.x) + 0.5, f64::from(p.y), f64::from(p.z) + 0.5],
+                ));
+                self.swing_arm(true);
+                return;
+            }
+            let below = self.world.get_block(BlockPos::new(p.x, p.y - 1, p.z));
+            state = b.with(state, "distance", &d.to_string());
+            state = b.with(
+                state,
+                "bottom",
+                if d > 0 && name_of(below) != "scaffolding" {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
         }
         // Don't place inside the player or mobs.
         let pb = self.player.aabb();
@@ -2015,7 +2387,7 @@ impl Game {
             self.world.set_block(p, ns);
         }
         self.block_sound(state, "place", p, 1.0, 0.8);
-        self.swing = 6;
+        self.swing_arm(true);
         if self.player.mode == GameMode::Survival {
             self.inv.consume_held();
         }
@@ -2047,6 +2419,59 @@ impl Game {
         if mode == GameMode::Survival && !keep {
             self.inv = Inventory::default();
         }
+        if self.world.dimension != rc_worldgen::Dimension::Overworld {
+            // The spawn point is in the Overworld.
+            self.wants_dimension = Some(("overworld".to_owned(), self.player.pos));
+            self.spawned = false;
+        }
+    }
+
+    /// After taking a station's result: sounds, and the anvil's 12 % chance
+    /// to wear a step (anvil → chipped → damaged → destroyed).
+    pub fn station_used(&mut self, pos: BlockPos, kind: crate::stations::Station) {
+        use crate::stations::Station;
+        let at = Some([
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        ]);
+        let ev = match kind {
+            Station::Anvil => {
+                let s = self.world.get_block(pos);
+                let next = match name_of(s) {
+                    "anvil" => Some("chipped_anvil"),
+                    "chipped_anvil" => Some("damaged_anvil"),
+                    _ => None,
+                };
+                if self.player.mode != GameMode::Creative && rand::rng().random_bool(0.12) {
+                    let b = rc_data::blocks();
+                    match next {
+                        Some(n) => {
+                            let facing = b.get(s, "facing").unwrap_or("north");
+                            self.set_block(pos, b.with(b.default_state(n), "facing", facing));
+                        }
+                        None => {
+                            self.set_block(pos, BlockStateId::AIR);
+                            self.sound(
+                                "block.anvil.destroy",
+                                at,
+                                1.0,
+                                1.0,
+                                rc_audio::Category::Blocks,
+                            );
+                            self.close_container();
+                            self.container = None;
+                            return;
+                        }
+                    }
+                }
+                "block.anvil.use"
+            }
+            Station::Grindstone => "block.grindstone.use",
+            Station::Stonecutter => "ui.stonecutter.take_result",
+            Station::Smithing => "block.smithing_table.use",
+        };
+        self.sound(ev, at, 1.0, 1.0, rc_audio::Category::Blocks);
     }
 
     /// Return crafting-grid items to the inventory (on closing a GUI).
