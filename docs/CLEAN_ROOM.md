@@ -49,4 +49,12 @@ When a non-obvious behaviour is implemented, add a line here or a doc comment:
 | entities | model shapes in the box-UV texture layout | minecraft.wiki "Model" and the public texture layouts; geometry authored by hand |
 | audio | sound events and variants | the player's own `sounds.json` (asset index), minecraft.wiki "Sounds.json" |
 | formats | `level.dat`, region `.mca`, chunk NBT, player NBT | minecraft.wiki "Java Edition level format", "Region file format", "Chunk format", "Player.dat format" |
-
+| gameplay | swimming, sprint-swimming and water movement speeds | minecraft.wiki "Swimming", "Transportation" |
+| gameplay | scaffolding placement, support distance, falling | minecraft.wiki "Scaffolding" |
+| gameplay | nether portal frames, lighting, 8:1 travel | minecraft.wiki "Nether portal" |
+| gameplay | anvil repair materials and costs, grindstone, stonecutter, smithing | minecraft.wiki "Anvil", "Grindstone", "Stonecutter", "Smithing Table" |
+| gameplay | creative breaking delay, arm swing while holding attack | black-box observation of the real game |
+| rendering | spawn egg colours | minecraft.wiki "Spawn Egg colors" |
+| rendering | dye colours (banners, beds) and leather/potion default tints | minecraft.wiki "Dye", "Leather Armor", "Potion" |
+| rendering | block-entity item shapes (beds, banners, chests, shulker boxes, heads) | public texture layouts; geometry authored by hand |
+| launchers | Prism Launcher / MultiMC folder layout and `InstanceDir` | inspection of the owner's own install |

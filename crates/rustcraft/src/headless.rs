@@ -283,6 +283,8 @@ pub fn run(req: &Request) -> Result<()> {
                 let g = engine.game.as_mut().expect("game");
                 g.player.mode = GameMode::Survival;
                 g.player.flying = scene == "hand";
+                g.player.xp_level = 7;
+                g.player.xp_progress = 0.4;
                 g.inv.slots.iter_mut().for_each(|s| *s = None);
                 for (i, (n, c)) in [
                     ("oak_planks", 12u8),

@@ -1179,9 +1179,37 @@ pub fn hud(ui: &mut Ui<'_>, cx: &mut Ctx<'_>) {
         ui.text_centered(&name, w / 2.0, y, [1.0, 1.0, 1.0, a]);
     }
     if g.player.mode == GameMode::Survival {
-        // XP bar (empty in this version).
-        if let Some(s) = t.xp_background {
-            ui.sprite(&s, hx, h - 29.0, 182.0, 5.0, WHITE);
+        // XP bar and level (green number with a dark outline, like vanilla).
+        let prog = g.player.xp_progress.clamp(0.0, 1.0);
+        match t.xp_background {
+            Some(s) => ui.sprite(&s, hx, h - 29.0, 182.0, 5.0, WHITE),
+            None => ui.fill(hx, h - 29.0, 182.0, 5.0, [0.0, 0.0, 0.0, 0.6]),
+        }
+        let pw = (182.0 * prog).floor();
+        if pw > 0.0 {
+            match t.xp_progress {
+                Some(mut s) => {
+                    s.uv = [
+                        s.uv[0],
+                        s.uv[1],
+                        s.uv[0] + (s.uv[2] - s.uv[0]) * pw / 182.0,
+                        s.uv[3],
+                    ];
+                    s.border = 0.0;
+                    ui.sprite(&s, hx, h - 29.0, pw, 5.0, WHITE);
+                }
+                None => ui.fill(hx, h - 28.0, pw, 3.0, [0.5, 1.0, 0.13, 1.0]),
+            }
+        }
+        if g.player.xp_level > 0 {
+            let lv = g.player.xp_level.to_string();
+            let (cx, cy) = (w / 2.0, h - 35.0);
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                let lw = ui.font.width(&lv);
+                ui.text_plain(&lv, cx - lw / 2.0 + dx, cy + dy, [0.0, 0.0, 0.0, 1.0]);
+            }
+            let lw = ui.font.width(&lv);
+            ui.text_plain(&lv, cx - lw / 2.0, cy, [0.5, 1.0, 0.13, 1.0]);
         }
         let hp = g.player.health.ceil() as i32;
         let blink = g.player.hurt_time > 0 && (g.player.hurt_time / 3) % 2 == 1;

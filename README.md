@@ -4,14 +4,25 @@ A clean-room reimplementation of **Minecraft: Java Edition 1.21.1** in Rust —
 fast, multi-core, GPU-first, and built to run from a Core 2 Duo laptop in under
 1 GB of RAM up to a 16-core desktop with 96 GB.
 
-> Status: **v0.1.0 — Phase 1 (core engine).** One seed-exact world you can
-> explore, mine and build in with naturally generated blocks.
+> Status: **v0.2.1 — Phase 2 (survival) plus the issue #2 fixes.** Seed-exact
+> worlds with crafting, smelting, hunger, mobs, weather, sound, nether portals
+> and Java world import/export. [`docs/PARITY.md`](docs/PARITY.md) lists what
+> matches vanilla and what is still missing.
 > See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the plan and
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it fits together.
 
 ![World view](docs/screenshots/phase1/world.png)
 
-## What works in 0.1
+## What works
+
+0.2 adds survival on top of the 0.1 engine described below: multiple worlds,
+crafting and smelting with every vanilla recipe, tools and durability, hunger
+and XP, passive mobs, dropped items, flowing water and lava, day/night and
+weather, sound and music, Java Edition world import/export, swimming,
+scaffolding, nether portals with Nether travel, and the anvil, grindstone,
+stonecutter and smithing table. See [`docs/releases/`](docs/releases/).
+
+The 0.1 engine:
 
 - **Seed-exact vanilla 1.21.1 terrain**: biomes, terrain noise, caves, aquifers,
   ore veins, surface rules, carvers and almost every overworld feature (trees,
@@ -35,7 +46,8 @@ fast, multi-core, GPU-first, and built to run from a Core 2 Duo laptop in under
 
 ## Getting started
 
-Download `rustcraft-0.1.0-windows-x86_64.exe` from the
+Download `rustcraft-<version>-windows-x86_64.exe` (Windows) or
+`rustcraft-<version>-linux-x86_64.AppImage` (Linux) from the
 [latest release](https://github.com/goglesquirmintontheiii/rcraft/releases/latest)
 and run it — it is portable, nothing is installed. Put a file named
 `portable.txt` next to the exe to keep saves and settings in a
@@ -43,7 +55,9 @@ and run it — it is portable, nothing is installed. Put a file named
 
 **Textures, fonts and GUI art come from your own Minecraft install.** If you
 have Minecraft Java 1.21.1 installed (launch it once so the 1.21.1 jar is
-downloaded), RustCraft finds it automatically. Otherwise it uses its own
+downloaded), RustCraft finds it automatically, whether it came from the
+official launcher, Prism Launcher, PolyMC or MultiMC. Options → Minecraft
+Directory lets you choose the folder yourself. Otherwise it uses its own
 built-in procedural textures. You can also point it at a jar or extracted
 assets folder with `--assets <path>` or the `RUSTCRAFT_ASSETS` variable.
 
@@ -55,6 +69,7 @@ assets folder with `--assets <path>` or the `RUSTCRAFT_ASSETS` variable.
 | Fly (creative) | double-tap Space |
 | Break / place / pick block | Left / Right / Middle mouse |
 | Inventory · chat · command | E · T · / |
+| Drop item / stack · swap offhand | Q / Ctrl+Q · F |
 | Hotbar | 1–9, mouse wheel |
 | Debug · hide HUD · screenshot · fullscreen | F3 · F1 · F2 · F11 |
 

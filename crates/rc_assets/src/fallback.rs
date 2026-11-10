@@ -28,6 +28,9 @@ fn name_hash(s: &str) -> u32 {
 fn style(name: &str) -> ([u8; 3], Style) {
     let has = |k: &str| name.contains(k);
     let rgb = |c: u32| [(c >> 16) as u8, (c >> 8) as u8, c as u8];
+    if name == "nether_portal" {
+        return (rgb(0x5a1fb0), Style::Translucent);
+    }
     if has("ore") {
         let speck = if has("coal") {
             0x2a2a2a
@@ -387,6 +390,28 @@ pub fn block_models(blocks: &Blocks, mip_levels: u32) -> BlockModels {
                 continue;
             }
             let info = &blocks.states[i];
+            if name == "nether_portal" {
+                // A 4-px-thick sheet across the frame, along its axis.
+                let z_axis = blocks.get(rc_core::BlockStateId(s), "axis") == Some("z");
+                let key = (bi as u16, u16::MAX - u16::from(z_axis));
+                let m = *shape_models.entry(key).or_insert_with(|| {
+                    let (from, to) = if z_axis {
+                        ([6.0 / 16.0, 0.0, 0.0], [10.0 / 16.0, 1.0, 1.0])
+                    } else {
+                        ([0.0, 0.0, 6.0 / 16.0], [1.0, 1.0, 10.0 / 16.0])
+                    };
+                    models.push(BakedModel {
+                        quads: cuboid(sprite, from, to, ti),
+                        ao: false,
+                    });
+                    models.len() as u32 - 1
+                });
+                states[i] = StateModel {
+                    parts: vec![vec![(m, 1)]],
+                };
+                layers[i] = Layer::Translucent;
+                continue;
+            }
             let key = (bi as u16, info.shape);
             let m = *shape_models.entry(key).or_insert_with(|| {
                 let boxes = &blocks.shapes[info.shape as usize];
