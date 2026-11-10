@@ -87,6 +87,8 @@ pub fn run(req: &Request) -> Result<()> {
             | "mobs"
             | "hand"
             | "rain"
+            | "nether"
+            | "station"
     );
     if world_scene {
         let dir = "Screenshot World";
@@ -155,9 +157,82 @@ pub fn run(req: &Request) -> Result<()> {
             std::thread::sleep(Duration::from_millis(20));
         }
         info!(elapsed = ?start.elapsed(), "world ready");
+        if scene == "nether" {
+            // Through a portal: change dimension, then wait for the arrival
+            // (which finds or builds a portal) and the chunks around it.
+            let pos = engine.game.as_ref().context("world")?.player.pos;
+            let (dim, to) = crate::portal::destination(rc_worldgen::Dimension::Overworld, pos)
+                .context("destination")?;
+            engine.change_dimension(dim, to)?;
+            let start = Instant::now();
+            loop {
+                let _ = frame(&mut engine);
+                let g = engine.game.as_mut().expect("game");
+                let (r, t) = g.world.spawn_progress(g.player_chunk(), rd);
+                if !g.arriving
+                    && r == t
+                    && g.world.mesh_out.is_empty()
+                    && g.world.pending_generation() == 0
+                {
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(300) {
+                    info!("timed out in the nether ({r}/{t})");
+                    break;
+                }
+            }
+            let g = engine.game.as_mut().expect("game");
+            g.player.yaw = num(3, 0.0) as f32;
+            g.player.pitch = num(4, 20.0) as f32;
+            info!(pos = ?g.player.pos, dim = ?g.world.dimension, "arrived");
+            // Step out of the portal to look back at it.
+            g.player.pos[2] -= 3.0;
+            g.player.prev_pos = g.player.pos;
+            g.portal_cooldown = 1000;
+        }
         engine.screens.clear();
         match scene {
             "f3" => engine.f3 = true,
+            "station" => {
+                // RC_STATION: anvil, grindstone, stonecutter, smithing_table.
+                let it = crate::items::items();
+                let g = engine.game.as_mut().expect("game");
+                let name = std::env::var("RC_STATION").unwrap_or_else(|_| "anvil".into());
+                let kind = crate::stations::Station::for_block(&name).context("station")?;
+                g.player.mode = GameMode::Survival;
+                g.player.xp_level = 5;
+                let s = |n: &str, c: u8, d: u16| {
+                    it.id(n).map(|item| crate::items::Stack {
+                        item,
+                        count: c,
+                        damage: d,
+                    })
+                };
+                let inputs = match kind {
+                    crate::stations::Station::Anvil => {
+                        vec![s("iron_pickaxe", 1, 180), s("iron_ingot", 4, 0)]
+                    }
+                    crate::stations::Station::Grindstone => {
+                        vec![s("diamond_sword", 1, 900), s("diamond_sword", 1, 1200)]
+                    }
+                    crate::stations::Station::Stonecutter => vec![s("stone", 12, 0)],
+                    crate::stations::Station::Smithing => vec![
+                        s("netherite_upgrade_smithing_template", 1, 0),
+                        s("diamond_chestplate", 1, 40),
+                        s("netherite_ingot", 1, 0),
+                    ],
+                };
+                for (i, st) in inputs.into_iter().enumerate() {
+                    g.craft[i] = st;
+                }
+                g.container = Some(crate::game::Container::Station {
+                    pos: rc_core::BlockPos::new(0, 0, 0),
+                    kind,
+                    selected: (kind == crate::stations::Station::Stonecutter).then_some(2),
+                    scroll: 0,
+                });
+                engine.screens.push(Screen::Inventory);
+            }
             "inventory" => {
                 let it = crate::items::items();
                 let g = engine.game.as_mut().expect("game");

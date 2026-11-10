@@ -345,6 +345,48 @@ impl Engine {
         Ok(())
     }
 
+    /// Move the player to another dimension of the same world: save, then
+    /// reopen the world streaming that dimension.
+    pub fn change_dimension(&mut self, dim: &str, pos: [f64; 3]) -> Result<()> {
+        let Some(dir_name) = self.world_name.clone() else {
+            return Ok(());
+        };
+        let Some(mut g) = self.game.take() else {
+            return Ok(());
+        };
+        let respawning = !g.spawned;
+        g.player.pos = pos;
+        g.player.prev_pos = pos;
+        g.player.vel = [0.0; 3];
+        g.world.meta.dimension = if dim == "overworld" {
+            String::new()
+        } else {
+            dim.to_owned()
+        };
+        g.save();
+        drop(g);
+        self.gfx.terrain.clear();
+        self.gfx.terrain.clear_batches();
+        let path = crate::worlds::world_path(&self.game_dir, &dir_name);
+        let world = World::open(
+            &path,
+            &dir_name,
+            0,
+            self.opts.worker_threads(),
+            mesh_shared(&self.gfx, &self.opts),
+        )?;
+        let mut g = Game::new(world);
+        if respawning {
+            // Died elsewhere: find the spawn point again.
+            g.spawned = false;
+        } else {
+            g.arriving = true;
+        }
+        self.game = Some(g);
+        self.screens = vec![Screen::Loading];
+        Ok(())
+    }
+
     pub fn close_world(&mut self) {
         if let Some(mut g) = self.game.take() {
             g.save();
@@ -464,10 +506,16 @@ impl Engine {
         };
         let sun_h = (tod * std::f32::consts::TAU).cos();
         let daylight = (sun_h * 2.0 + 0.5).clamp(0.0, 1.0);
+        let overworld = g.world.dimension == rc_worldgen::Dimension::Overworld;
         let mut sky = rgb(biome.sky_color);
         let mut fog = rgb(biome.fog_color);
-        for c in sky.iter_mut().chain(fog.iter_mut()) {
-            *c *= daylight * 0.94 + 0.06;
+        if overworld {
+            for c in sky.iter_mut().chain(fog.iter_mut()) {
+                *c *= daylight * 0.94 + 0.06;
+            }
+        } else {
+            // No sky in the Nether or the End: everything fades to fog.
+            sky = fog;
         }
         let underwater = p.eyes_in_water;
         if underwater {
@@ -484,10 +532,15 @@ impl Engine {
             render_distance_blocks: rd,
             sky_color: sky,
             fog_color: fog,
-            time_of_day: (0.25 - tod).rem_euclid(1.0),
+            time_of_day: if overworld {
+                (0.25 - tod).rem_euclid(1.0)
+            } else {
+                0.25
+            },
             underwater,
             cloud_offset: (g.tick as f32 + partial as f32) * 0.03,
             clouds: self.opts.clouds,
+            celestial: overworld,
             outline: None,
         })
     }
@@ -519,6 +572,12 @@ impl Engine {
         self.memory_guard();
         self.time += (dt * 20.0) as f32;
         self.simulate(dt);
+        if let Some((dim, pos)) = self.game.as_mut().and_then(|g| g.wants_dimension.take())
+            && let Err(e) = self.change_dimension(&dim, pos)
+        {
+            warn!("changing dimension: {e:#}");
+            self.close_world();
+        }
         let t_sim = t0.elapsed();
         let mut t_stream = Duration::ZERO;
         let mut t_upload = Duration::ZERO;

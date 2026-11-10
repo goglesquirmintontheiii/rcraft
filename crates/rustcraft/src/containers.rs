@@ -119,12 +119,74 @@ fn craft_size(g: &Game) -> usize {
 }
 
 fn craft_result(g: &Game) -> Option<Stack> {
+    if let Some(Container::Station { kind, selected, .. }) = g.container {
+        return station_outcome(g, kind, selected).map(|o| o.result);
+    }
     let n = craft_size(g);
     recipes().craft(&g.craft[..n * n], n)
 }
 
+/// A station's result, if the player can afford it.
+fn station_outcome(
+    g: &Game,
+    kind: crate::stations::Station,
+    selected: Option<usize>,
+) -> Option<crate::stations::Outcome> {
+    let o = crate::stations::outcome(kind, &g.craft[..kind.inputs()], selected)?;
+    let creative = g.player.mode == crate::player::GameMode::Creative;
+    (creative || o.levels <= g.player.xp_level).then_some(o)
+}
+
+/// Take a station result: pay levels, use up inputs, wear the anvil.
+fn take_station(g: &mut Game, to_inventory: bool) -> bool {
+    let Some(Container::Station {
+        pos,
+        kind,
+        selected,
+        ..
+    }) = g.container
+    else {
+        return false;
+    };
+    let Some(o) = station_outcome(g, kind, selected) else {
+        return false;
+    };
+    if to_inventory {
+        if g.inv.add_stack(o.result).is_some() {
+            return false;
+        }
+    } else {
+        match g.inv.cursor {
+            None => g.inv.cursor = Some(o.result),
+            Some(c) if c.stacks_with(&o.result) && c.count + o.result.count <= c.max() => {
+                g.inv.cursor = Some(Stack {
+                    count: c.count + o.result.count,
+                    ..c
+                });
+            }
+            _ => return false,
+        }
+    }
+    for (i, n) in o.consume.iter().enumerate().take(kind.inputs()) {
+        if let Some(s) = &mut g.craft[i] {
+            s.count = s.count.saturating_sub(*n);
+            if s.count == 0 {
+                g.craft[i] = None;
+            }
+        }
+    }
+    if g.player.mode != crate::player::GameMode::Creative {
+        g.player.xp_level = g.player.xp_level.saturating_sub(o.levels);
+    }
+    g.station_used(pos, kind);
+    true
+}
+
 /// Take the crafting result once; returns false if nothing was crafted.
 fn take_result(g: &mut Game, to_inventory: bool) -> bool {
+    if matches!(g.container, Some(Container::Station { .. })) {
+        return take_station(g, to_inventory);
+    }
     let Some(r) = craft_result(g) else {
         return false;
     };
@@ -226,6 +288,28 @@ fn click(g: &mut Game, slot: SlotRef, right: bool, shift: bool) {
                         }
                     }
                     g.inv.slots[i] = (st.count > 0).then_some(st);
+                } else if let Some(Container::Station { kind, .. }) = g.container {
+                    // Into the station's inputs.
+                    if let Some(mut st) = g.inv.slots[i] {
+                        for k in 0..kind.inputs() {
+                            match &mut g.craft[k] {
+                                Some(c) if c.stacks_with(&st) && c.count < c.max() => {
+                                    let n = (c.max() - c.count).min(st.count);
+                                    c.count += n;
+                                    st.count -= n;
+                                }
+                                None => {
+                                    g.craft[k] = Some(st);
+                                    st.count = 0;
+                                }
+                                _ => {}
+                            }
+                            if st.count == 0 {
+                                break;
+                            }
+                        }
+                        g.inv.slots[i] = (st.count > 0).then_some(st);
+                    }
                 } else {
                     g.inv.quick_move(i);
                 }
@@ -394,6 +478,146 @@ pub fn container(ui: &mut Ui<'_>, gfx: &Gfx, g: &mut Game, out: &mut Vec<Action>
                 tex.is_none(),
             ) {
                 hovered = Some(SlotRef::Result);
+            }
+            ui.text_plain("Inventory", x0 + 8.0, y0 + 72.0, LABEL);
+            player_rows(ui, gfx, g, x0 + 8.0, y0 + 84.0, tex.is_none(), &mut hovered);
+        }
+        Some(Container::Station {
+            kind,
+            selected,
+            scroll,
+            ..
+        }) => {
+            use crate::stations::Station;
+            let (kind, selected, scroll) = (*kind, *selected, *scroll);
+            let (x0, y0) = ((w - 176.0) / 2.0, (h - 166.0) / 2.0);
+            let key = match kind {
+                Station::Anvil => "anvil",
+                Station::Grindstone => "grindstone",
+                Station::Stonecutter => "stonecutter",
+                Station::Smithing => "smithing",
+            };
+            let tex = theme.extra.get(key).copied();
+            panel(ui, tex, x0, y0, 176.0, 166.0, 0.0);
+            let (inputs, result): (&[(f32, f32)], (f32, f32)) = match kind {
+                Station::Anvil => (&[(27.0, 47.0), (76.0, 47.0)], (134.0, 47.0)),
+                Station::Grindstone => (&[(49.0, 19.0), (49.0, 40.0)], (129.0, 34.0)),
+                Station::Stonecutter => (&[(20.0, 33.0)], (143.0, 33.0)),
+                Station::Smithing => (&[(8.0, 48.0), (26.0, 48.0), (44.0, 48.0)], (98.0, 48.0)),
+            };
+            let title_x = match kind {
+                Station::Anvil => 60.0,
+                Station::Smithing => 44.0,
+                _ => 8.0,
+            };
+            ui.text_plain(kind.title(), x0 + title_x, y0 + 6.0, LABEL);
+            if kind == Station::Anvil
+                && let Some(sp) = theme.extra.get("anvil_text_field_disabled")
+            {
+                // Renaming needs item names (Phase 3): the field stays disabled.
+                ui.sprite(sp, x0 + 59.0, y0 + 20.0, 110.0, 16.0, WHITE);
+            }
+            for (i, (sx, sy)) in inputs.iter().enumerate() {
+                if inv_slot(ui, gfx, g.craft[i], x0 + sx, y0 + sy, tex.is_none()) {
+                    hovered = Some(SlotRef::Craft(i));
+                }
+            }
+            if inv_slot(
+                ui,
+                gfx,
+                craft_result(g),
+                x0 + result.0,
+                y0 + result.1,
+                tex.is_none(),
+            ) {
+                hovered = Some(SlotRef::Result);
+            }
+            if kind == Station::Anvil
+                && let Some(o) = crate::stations::outcome(kind, &g.craft[..2], None)
+                && o.levels > 0
+            {
+                let creative = g.player.mode == crate::player::GameMode::Creative;
+                let ok = creative || o.levels <= g.player.xp_level;
+                let msg = format!("Enchantment Cost: {}", o.levels);
+                let c = if ok {
+                    [0.5, 1.0, 0.13, 1.0]
+                } else {
+                    [1.0, 0.38, 0.38, 1.0]
+                };
+                let tw = ui.font.width(&msg);
+                ui.fill(
+                    x0 + 168.0 - tw - 4.0,
+                    y0 + 67.0,
+                    tw + 4.0,
+                    12.0,
+                    [0.0, 0.0, 0.0, 0.3],
+                );
+                ui.text(&msg, x0 + 168.0 - tw - 2.0, y0 + 69.0, c);
+            }
+            if kind == Station::Stonecutter {
+                let opts = g.craft[0]
+                    .map(crate::stations::stonecutter_options)
+                    .unwrap_or_default();
+                let rows = opts.len().div_ceil(4);
+                let max_scroll = rows.saturating_sub(3);
+                let mut new_scroll = scroll.min(max_scroll);
+                if ui.hover(x0 + 52.0, y0 + 14.0, 75.0, 54.0) && ui.input.scroll != 0.0 {
+                    new_scroll = if ui.input.scroll > 0.0 {
+                        new_scroll.saturating_sub(1)
+                    } else {
+                        (new_scroll + 1).min(max_scroll)
+                    };
+                }
+                let mut new_sel = selected.filter(|s| *s < opts.len());
+                for (k, st) in opts.iter().enumerate().skip(new_scroll * 4).take(12) {
+                    let v = k - new_scroll * 4;
+                    let (bx, by) = (
+                        x0 + 52.0 + (v % 4) as f32 * 16.0,
+                        y0 + 14.0 + (v / 4) as f32 * 18.0,
+                    );
+                    let hover = ui.hover(bx, by, 16.0, 18.0);
+                    let sprite = if new_sel == Some(k) {
+                        "stonecutter_recipe_selected"
+                    } else if hover {
+                        "stonecutter_recipe_highlighted"
+                    } else {
+                        "stonecutter_recipe"
+                    };
+                    match theme.extra.get(sprite) {
+                        Some(sp) => ui.sprite(sp, bx, by, 16.0, 18.0, WHITE),
+                        None => ui.fill(
+                            bx,
+                            by,
+                            16.0,
+                            18.0,
+                            if new_sel == Some(k) {
+                                [0.4, 0.6, 0.4, 1.0]
+                            } else {
+                                [0.6, 0.6, 0.6, 1.0]
+                            },
+                        ),
+                    }
+                    draw_stack(ui, gfx, *st, bx, by + 1.0);
+                    if hover {
+                        if ui.input.pressed {
+                            ui.input.pressed = false;
+                            ui.input.clicked_sound = true;
+                            new_sel = Some(k);
+                        }
+                        let it = items();
+                        ui.tooltip(&[it.display_name(st.item)]);
+                    }
+                }
+                if g.craft[0].is_none() {
+                    new_sel = None;
+                }
+                if let Some(Container::Station {
+                    selected, scroll, ..
+                }) = &mut g.container
+                {
+                    *selected = new_sel;
+                    *scroll = new_scroll;
+                }
             }
             ui.text_plain("Inventory", x0 + 8.0, y0 + 72.0, LABEL);
             player_rows(ui, gfx, g, x0 + 8.0, y0 + 84.0, tex.is_none(), &mut hovered);

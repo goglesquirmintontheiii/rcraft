@@ -91,27 +91,52 @@ pub mod prof {
     }
 }
 
+/// Dimension from the saved name ("" = overworld).
+#[must_use]
+pub fn dimension_of(name: &str) -> Dimension {
+    match name {
+        "the_nether" | "minecraft:the_nether" => Dimension::Nether,
+        "the_end" | "minecraft:the_end" => Dimension::End,
+        _ => Dimension::Overworld,
+    }
+}
+
 /// Convert a finished worldgen chunk into a runtime chunk column.
 #[must_use]
 pub fn export_chunk(p: &ProtoChunk) -> Chunk {
     let mut c = Chunk::new_empty(p.pos);
     let mut vals = vec![0u32; 4096];
     let mut bvals = vec![0u32; 64];
-    for (s, sec) in c.sections.iter_mut().enumerate() {
-        let y0 = s * 16;
-        if (y0 as i32) >= p.height {
+    // The Nether and the End generate 0..256 / 0..128, not -64..320: place
+    // their sections at the right height (0.2.0 put the Nether 64 blocks low).
+    let offset = ((p.min_y - WORLD_MIN_Y) / 16) as usize;
+    let proto_sections = (p.height / 16) as usize;
+    for ps in 0..proto_sections {
+        let Some(sec) = c.sections.get_mut(ps + offset) else {
             break;
-        }
-        let base = y0 * 256;
+        };
+        let base = ps * 16 * 256;
         for (i, v) in vals.iter_mut().enumerate() {
             *v = p.blocks[base + i].0;
         }
         sec.blocks = PalettedContainer::from_values(&vals);
-        let qbase = s * 64;
+        let qbase = ps * 64;
         for (i, v) in bvals.iter_mut().enumerate() {
             *v = p.biomes.get(qbase + i).map_or(0, |b| b.0);
         }
         sec.biomes = PalettedContainer::from_values(&bvals);
+    }
+    // Sections outside the generated range take the nearest biome layer.
+    if proto_sections > 0 {
+        let below = c.sections[offset].biomes.clone();
+        let above = c.sections[offset + proto_sections - 1].biomes.clone();
+        for (i, sec) in c.sections.iter_mut().enumerate() {
+            if i < offset {
+                sec.biomes = below.clone();
+            } else if i >= offset + proto_sections {
+                sec.biomes = above.clone();
+            }
+        }
     }
     for z in 0..16 {
         for x in 0..16 {
@@ -385,6 +410,8 @@ pub struct World {
     /// Centre and render distance of the last streaming scan; the O(r²)
     /// scans only rerun when either changes.
     last_scan: Option<(ChunkPos, i32)>,
+    /// Which dimension this world instance streams.
+    pub dimension: Dimension,
     /// Loaded chunks that may still need lighting or (re)meshing. Only these
     /// are considered each frame, instead of every loaded chunk.
     todo: AHashSet<ChunkPos>,
@@ -500,6 +527,7 @@ impl World {
                 clear_weather_time: 0,
                 rules: Default::default(),
                 world_type: "normal".into(),
+                dimension: String::new(),
             };
             m.write(&header)?;
             m
@@ -514,8 +542,13 @@ impl World {
             |s| b.parse_state(s).ok(),
             |s| reg.id(s),
         ));
-        let storage = Arc::new(DimStorage::new(dir.join("dim/overworld"))?);
-        let dg = Arc::new(DimensionGen::new(Dimension::Overworld, meta.seed));
+        let dimension = dimension_of(&meta.dimension);
+        let storage = Arc::new(DimStorage::new(dir.join(match dimension {
+            Dimension::Overworld => "dim/overworld",
+            Dimension::Nether => "dim/the_nether",
+            Dimension::End => "dim/the_end",
+        }))?);
+        let dg = Arc::new(DimensionGen::new(dimension, meta.seed));
         let pool = Arc::new(
             rayon::ThreadPoolBuilder::new()
                 .num_threads(threads.max(1))
@@ -542,7 +575,7 @@ impl World {
                 .name("rc-io".into())
                 .spawn(move || io_thread(st, map, io_rx))?
         };
-        info!(name = %meta.name, seed = meta.seed, "world opened");
+        info!(name = %meta.name, seed = meta.seed, ?dimension, "world opened");
         Ok(Self {
             dir: dir.to_owned(),
             meta,
@@ -570,6 +603,7 @@ impl World {
             remesh: AHashMap::new(),
             in_flight: 0,
             max_in_flight: threads.max(1) * 3,
+            dimension,
             last_scan: None,
             todo: AHashSet::new(),
             load_queue: Vec::new(),

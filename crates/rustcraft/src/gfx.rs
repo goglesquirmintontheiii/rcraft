@@ -307,6 +307,23 @@ impl Gfx {
                 format!("gui/sprites/container/{c}/burn_progress"),
             );
         }
+        for c in ["anvil", "grindstone", "stonecutter", "smithing"] {
+            extra(c.into(), format!("gui/container/{c}"));
+        }
+        for k in ["recipe", "recipe_selected", "recipe_highlighted"] {
+            extra(
+                format!("stonecutter_{k}"),
+                format!("gui/sprites/container/stonecutter/{k}"),
+            );
+        }
+        extra(
+            "anvil_error".into(),
+            "gui/sprites/container/anvil/error".into(),
+        );
+        extra(
+            "anvil_text_field_disabled".into(),
+            "gui/sprites/container/anvil/text_field_disabled".into(),
+        );
         extra(
             "hotbar_offhand_left".into(),
             "gui/sprites/hud/hotbar_offhand_left".into(),

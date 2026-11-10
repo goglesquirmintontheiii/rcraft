@@ -231,6 +231,8 @@ pub struct FrameParams {
     pub underwater: bool,
     pub cloud_offset: f32,
     pub clouds: bool,
+    /// Sun, moon and stars (overworld only).
+    pub celestial: bool,
     /// Selected block outline boxes in world space.
     pub outline: Option<([i32; 3], &'static [[f64; 6]])>,
 }
@@ -1246,7 +1248,7 @@ impl TerrainRenderer {
             };
         let up_axis = Vec3::Z;
         let side = sun_dir.cross(up_axis).normalize();
-        if !p.underwater {
+        if !p.underwater && p.celestial {
             push_quad(
                 &mut qv,
                 sun_dir * 100.0,
@@ -1266,7 +1268,7 @@ impl TerrainRenderer {
         }
         let sky_quads = qv.len() as u32;
         let mut cloud_quads = 0;
-        if p.clouds && self.cloud_img.is_some() && !p.underwater {
+        if p.clouds && p.celestial && self.cloud_img.is_some() && !p.underwater {
             let h = 192.33 - cam[1] as f32;
             let size = (rd * 2.0).max(256.0) + 256.0;
             let scale = 12.0 * 256.0;

@@ -47,6 +47,16 @@ pub struct Recipes {
     pub crafting: Vec<Recipe>,
     pub cooking: AHashMap<Cooker, Vec<Cooking>>,
     pub stonecutting: Vec<(Ingredient, Stack)>,
+    /// `smithing_transform` recipes (netherite upgrades).
+    pub smithing: Vec<Smithing>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Smithing {
+    pub template: Ingredient,
+    pub base: Ingredient,
+    pub addition: Ingredient,
+    pub result: Stack,
 }
 
 fn ingredient(v: &Value) -> Ingredient {
@@ -162,6 +172,16 @@ impl Recipes {
                 "minecraft:stonecutting" => {
                     if let Some(res) = result(&j["result"]) {
                         r.stonecutting.push((ingredient(&j["ingredient"]), res));
+                    }
+                }
+                "minecraft:smithing_transform" => {
+                    if let Some(res) = result(&j["result"]) {
+                        r.smithing.push(Smithing {
+                            template: ingredient(&j["template"]),
+                            base: ingredient(&j["base"]),
+                            addition: ingredient(&j["addition"]),
+                            result: res,
+                        });
                     }
                 }
                 _ => {}

@@ -666,6 +666,9 @@ pub struct WorldMeta {
     pub rules: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub world_type: String,
+    /// Dimension the player is in: "" / "overworld", "the_nether", "the_end".
+    #[serde(default)]
+    pub dimension: String,
 }
 
 impl WorldMeta {
@@ -812,6 +815,7 @@ mod tests {
             clear_weather_time: 0,
             rules: Default::default(),
             world_type: String::new(),
+            dimension: String::new(),
         };
         m.write(&p).unwrap();
         m.write(&p).unwrap();

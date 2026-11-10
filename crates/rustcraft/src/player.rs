@@ -2,10 +2,21 @@
 
 use rc_core::{BlockPos, BlockStateId};
 use rc_physics::consts::*;
+
 use rc_physics::{Aabb, Collider, move_and_collide};
 use serde::{Deserialize, Serialize};
 
 use crate::world::World;
+
+/// Swimming pose height and eye height (blocks).
+const SWIM_H: f64 = 0.6;
+const EYE_SWIM: f64 = 0.4;
+/// Sprint-swimming acceleration per tick and drag.
+const SWIM_ACCEL: f64 = 0.02;
+const SWIM_DRAG: f64 = 0.9;
+/// In water (not swimming): sink and jump-rise per tick.
+const WATER_GRAVITY: f64 = 0.004;
+const WATER_JUMP: f64 = 0.0265;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -88,6 +99,9 @@ pub struct Player {
     pub in_lava: bool,
     #[serde(skip)]
     pub eyes_in_water: bool,
+    /// Sprint-swimming: low 0.6-block pose, moving where the camera looks.
+    #[serde(skip)]
+    pub swimming: bool,
     #[serde(skip)]
     pub hurt_time: u32,
     #[serde(skip)]
@@ -136,6 +150,7 @@ impl Default for Player {
             in_water: false,
             in_lava: false,
             eyes_in_water: false,
+            swimming: false,
             hurt_time: 0,
             walk_dist: 0.0,
             prev_walk_dist: 0.0,
@@ -204,7 +219,9 @@ pub fn outline_boxes(s: BlockStateId) -> Vec<[f64; 6]> {
 impl Player {
     #[must_use]
     pub fn height(&self) -> f64 {
-        if self.sneaking && !self.flying {
+        if self.swimming {
+            SWIM_H
+        } else if self.sneaking && !self.flying {
             PLAYER_H_SNEAK
         } else {
             PLAYER_H
@@ -309,9 +326,7 @@ impl Player {
         )));
         self.eyes_in_water =
             ef.is_water() && eye[1] < eye[1].floor() + f64::from(ef.own_height()) + 0.01;
-        self.sneaking = input.sneak && !self.flying;
-        let target_eye = if self.sneaking { EYE_SNEAK } else { EYE };
-        self.eye_height += (target_eye - self.eye_height) * 0.5;
+        self.sneaking = input.sneak && !self.flying && !self.swimming;
         if input.sprint
             && input.forward > 0.0
             && !self.sneaking
@@ -322,6 +337,27 @@ impl Player {
         if input.forward <= 0.0 || self.sneaking {
             self.sprinting = false;
         }
+        // Sprint-swimming (minecraft.wiki "Swimming"): sprinting with the head
+        // under water; sprinting at the surface keeps the player level.
+        if self.sprinting && self.in_water && self.eyes_in_water && !self.flying {
+            self.swimming = true;
+        } else if self.swimming && (!self.in_water || !self.sprinting || self.flying) {
+            // Stay low (crawl) until there is room to stand.
+            let stand = Aabb::at_feet(self.pos, PLAYER_W, PLAYER_H);
+            self.scratch.clear();
+            world.boxes(&stand, &mut self.scratch);
+            if !self.scratch.iter().any(|b| b.intersects(&stand)) {
+                self.swimming = false;
+            }
+        }
+        let target_eye = if self.swimming {
+            EYE_SWIM
+        } else if self.sneaking {
+            EYE_SNEAK
+        } else {
+            EYE
+        };
+        self.eye_height += (target_eye - self.eye_height) * 0.5;
 
         // Vanilla damps raw input by 0.98 before applying it.
         let mut fwd = f64::from(input.forward) * 0.98;
@@ -347,20 +383,54 @@ impl Player {
                 self.flying = false;
             }
             self.fall_distance = 0.0;
+        } else if self.swimming {
+            // Along the look direction, pitch included. Terminal speed
+            // 0.02·0.98/(1-0.9) ≈ 0.196 b/t = 3.92 b/s, the wiki's
+            // sprint-swimming speed; no sinking while swimming.
+            let (sy, cy) = f64::from(self.yaw).to_radians().sin_cos();
+            let (sp, cp) = f64::from(self.pitch).to_radians().sin_cos();
+            let a = SWIM_ACCEL * fwd;
+            self.vel[0] += -sy * cp * a;
+            self.vel[1] += -sp * a;
+            self.vel[2] += cy * cp * a;
+            self.move_relative(0.0, strafe, SWIM_ACCEL);
+            if input.jump {
+                self.vel[1] += 0.01;
+            }
+            if input.sneak {
+                self.vel[1] -= 0.03;
+            }
+            self.do_move(world, false);
+            self.vel[0] *= SWIM_DRAG;
+            self.vel[1] *= SWIM_DRAG;
+            self.vel[2] *= SWIM_DRAG;
+            self.fall_distance = 0.0;
         } else if self.in_water || self.in_lava {
             let y0 = self.pos[1];
-            self.move_relative(fwd, strafe, 0.02 * if self.sprinting { 1.5 } else { 1.0 });
+            self.move_relative(fwd, strafe, 0.02 * if self.sprinting { 1.12 } else { 1.0 });
             self.do_move(world, false);
             let drag = if self.in_water { 0.8 } else { 0.5 };
             self.vel[0] *= drag;
             self.vel[1] *= 0.8;
             self.vel[2] *= drag;
-            self.vel[1] -= 0.02;
-            if input.jump {
-                self.vel[1] += 0.04;
-            }
-            if input.sneak {
+            if self.in_water {
+                // Slow sink (~0.4 b/s), rise ~2.2 b/s holding jump, faster
+                // descent sneaking (minecraft.wiki "Transportation").
+                self.vel[1] -= WATER_GRAVITY;
+                if input.jump {
+                    self.vel[1] += WATER_JUMP;
+                }
+                if input.sneak {
+                    self.vel[1] -= 0.02;
+                }
+            } else {
                 self.vel[1] -= 0.02;
+                if input.jump {
+                    self.vel[1] += 0.04;
+                }
+                if input.sneak {
+                    self.vel[1] -= 0.02;
+                }
             }
             // Climb out onto ledges.
             let probe = self.aabb().offset([
@@ -850,5 +920,83 @@ mod tests {
         let speed = p.pos[2] - z0;
         // Vanilla walking speed is ~4.317 blocks/s.
         assert!((speed - 4.317).abs() < 0.05, "speed {speed}");
+    }
+
+    /// Stone floor at y < 64 and still water from 64 to 95.
+    fn water_world() -> World {
+        let w = flat_world();
+        let mut w = w;
+        let water = rc_data::blocks().default_state("water");
+        let stone = rc_data::blocks().default_state("stone");
+        for cx in -2..=2 {
+            for cz in -2..=2 {
+                let mut c = rc_world::Chunk::new_empty(ChunkPos::new(cx, cz));
+                for x in 0..16 {
+                    for z in 0..16 {
+                        for y in 60..64 {
+                            c.set_block(BlockPos::new(cx * 16 + x, y, cz * 16 + z), stone);
+                        }
+                        for y in 64..96 {
+                            c.set_block(BlockPos::new(cx * 16 + x, y, cz * 16 + z), water);
+                        }
+                    }
+                }
+                w.chunks.insert(c.pos, Arc::new(c));
+            }
+        }
+        w
+    }
+
+    fn speed_over(p: &mut Player, input: &MoveInput, w: &World, axis: usize) -> f64 {
+        for _ in 0..40 {
+            p.tick(input, w);
+        }
+        let a = p.pos[axis];
+        for _ in 0..20 {
+            p.tick(input, w);
+        }
+        p.pos[axis] - a
+    }
+
+    #[test]
+    fn water_speeds_match_the_wiki() {
+        let w = water_world();
+        // Underwater walking: ~1.97 b/s.
+        let mut p = Player {
+            pos: [0.5, 75.0, -20.5],
+            ..Player::default()
+        };
+        let fwd = MoveInput {
+            forward: 1.0,
+            ..MoveInput::default()
+        };
+        let v = speed_over(&mut p, &fwd, &w, 2);
+        assert!((v - 1.97).abs() < 0.1, "underwater {v}");
+        assert!(!p.swimming);
+        // Sinking with no input: ~0.39 b/s.
+        let mut p = Player {
+            pos: [0.5, 85.0, 0.5],
+            ..Player::default()
+        };
+        let v = -speed_over(&mut p, &MoveInput::default(), &w, 1);
+        assert!((v - 0.39).abs() < 0.08, "sink {v}");
+        // Sprint-swimming: ~3.92 b/s along the look direction, low pose.
+        let mut p = Player {
+            pos: [0.5, 75.0, -20.5],
+            ..Player::default()
+        };
+        let sprint = MoveInput {
+            forward: 1.0,
+            sprint: true,
+            ..MoveInput::default()
+        };
+        let v = speed_over(&mut p, &sprint, &w, 2);
+        assert!(p.swimming);
+        assert!((p.height() - 0.6).abs() < 1e-9);
+        assert!((v - 3.92).abs() < 0.15, "swim {v}");
+        // Looking down swims down.
+        p.pitch = 60.0;
+        let dy = speed_over(&mut p, &sprint, &w, 1);
+        assert!(dy < -2.0, "dive {dy}");
     }
 }
