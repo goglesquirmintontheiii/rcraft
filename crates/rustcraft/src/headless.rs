@@ -33,6 +33,7 @@ pub fn run(req: &Request) -> Result<()> {
         opts.render_distance = rd;
     }
     opts.max_memory_mb = opts.max_memory_mb.max(8192);
+    opts.apply_minecraft_dir();
     let assets = rc_assets::Assets::discover(
         req.assets
             .as_deref()
@@ -69,6 +70,9 @@ pub fn run(req: &Request) -> Result<()> {
         a
     };
     let scene = req.scene.as_str();
+    if scene == "bench" {
+        return bench(&mut engine, &ctx, req);
+    }
     let world_scene = matches!(
         scene,
         "world"
@@ -186,7 +190,16 @@ pub fn run(req: &Request) -> Result<()> {
                 });
             }
             "creative" => engine.screens.push(Screen::Creative {
-                tab: crate::containers::CreativeTab::Items(crate::items::Tab::Building),
+                // RC_TAB picks the tab: "search", "inventory" or an index.
+                tab: match std::env::var("RC_TAB").as_deref() {
+                    Ok("search") => crate::containers::CreativeTab::Search,
+                    Ok("inventory") => crate::containers::CreativeTab::Inventory,
+                    Ok(n) => crate::containers::CreativeTab::Items(
+                        crate::items::Tab::ALL
+                            [n.parse::<usize>().unwrap_or(0) % crate::items::Tab::ALL.len()],
+                    ),
+                    Err(_) => crate::containers::CreativeTab::Items(crate::items::Tab::Building),
+                },
                 scroll: 0.0,
                 search: String::new(),
             }),
@@ -391,6 +404,150 @@ pub fn run(req: &Request) -> Result<()> {
     info!(path = %req.path.display(), "screenshot written");
     if engine.game.is_some() {
         engine.close_world();
+    }
+    Ok(())
+}
+
+/// `--scene bench`: stream a fresh world while flying, and report chunk
+/// throughput, main-thread streaming cost and memory. Environment:
+/// `RC_BENCH_SECS` (default 30), `RC_BENCH_SPEED` blocks/s (default 0 =
+/// stand still), `RC_BENCH_FRAMES` (default 1 = full frames, 0 = streaming
+/// only), `RC_BENCH_SPIN` degrees/s of turning, `RC_BENCH_Y` eye height,
+/// `RC_BENCH_MEM` memory limit in MB.
+fn bench(engine: &mut Engine, ctx: &rc_render::GpuContext, req: &Request) -> Result<()> {
+    let env = |k: &str, d: f64| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let secs = env("RC_BENCH_SECS", 30.0);
+    let speed = env("RC_BENCH_SPEED", 0.0);
+    let frames = env("RC_BENCH_FRAMES", 1.0) > 0.0;
+    let spin = env("RC_BENCH_SPIN", 0.0) as f32;
+    let y0 = env("RC_BENCH_Y", 140.0);
+    if let Ok(v) = std::env::var("RC_BENCH_MEM")
+        && let Ok(mb) = v.parse()
+    {
+        engine.opts.max_memory_mb = mb;
+    }
+    info!(
+        mem_mb = crate::sysinfo::process_memory_mb(),
+        "bench before world"
+    );
+    let dir = "Bench World";
+    let _ = std::fs::remove_dir_all(crate::worlds::world_path(&req.game_dir, dir));
+    engine.open_world(
+        None,
+        Some(crate::engine::NewWorld {
+            name: dir.into(),
+            seed: req.seed,
+            mode: 1,
+            difficulty: 2,
+            rules: Vec::new(),
+        }),
+    )?;
+    engine.screens.clear();
+    info!(
+        mem_mb = crate::sysinfo::process_memory_mb(),
+        "bench world open"
+    );
+    let (w, h) = req.size;
+    let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bench"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: rc_render::OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    {
+        let g = engine.game.as_mut().context("world")?;
+        g.player.mode = GameMode::Creative;
+        g.player.flying = true;
+        g.player.pos = [0.0, y0, 0.0];
+        g.player.prev_pos = g.player.pos;
+        g.player.pitch = 10.0;
+        g.spawned = true;
+    }
+    let start = Instant::now();
+    let mut times: Vec<f64> = Vec::new();
+    let mut last = Instant::now();
+    let mut peak_mb = 0.0f32;
+    let mut report = Instant::now();
+    while start.elapsed().as_secs_f64() < secs {
+        let dt = last.elapsed().as_secs_f64().clamp(0.001, 0.25);
+        last = Instant::now();
+        {
+            let g = engine.game.as_mut().context("world")?;
+            g.player.pos[0] += speed * dt;
+            g.player.yaw = (g.player.yaw + spin * dt as f32).rem_euclid(360.0);
+            g.player.prev_pos = g.player.pos;
+            g.player.vel = [0.0; 3];
+        }
+        let t = Instant::now();
+        if frames {
+            let _ = engine.frame(&ctx.device, &ctx.queue, &view, (w, h), dt);
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        } else {
+            engine.stream_only(&ctx.device);
+        }
+        times.push(t.elapsed().as_secs_f64() * 1000.0);
+        let mb = crate::sysinfo::process_memory_mb();
+        peak_mb = peak_mb.max(mb);
+        if report.elapsed() > Duration::from_secs(5) {
+            report = Instant::now();
+            let g = engine.game.as_ref().context("world")?;
+            info!(
+                t = start.elapsed().as_secs(),
+                generated = g.world.generated_count,
+                loaded = g.world.chunks.len(),
+                pending = g.world.pending_generation(),
+                rd = engine.render_distance(),
+                mem_mb = mb,
+                "bench"
+            );
+        }
+        if !frames {
+            std::thread::sleep(Duration::from_millis(4));
+        }
+    }
+    let g = engine.game.as_ref().context("world")?;
+    let el = start.elapsed().as_secs_f64();
+    times.sort_by(f64::total_cmp);
+    let pct = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+    info!(
+        chunks_per_sec = format!("{:.1}", g.world.generated_count as f64 / el),
+        generated = g.world.generated_count,
+        loaded = g.world.chunks.len(),
+        frames = times.len(),
+        frame_ms_p50 = format!("{:.2}", pct(0.5)),
+        frame_ms_p99 = format!("{:.2}", pct(0.99)),
+        frame_ms_max = format!("{:.2}", pct(1.0)),
+        peak_mem_mb = peak_mb,
+        "bench result"
+    );
+    info!(
+        carved = crate::world::prof::CARVED.load(std::sync::atomic::Ordering::Relaxed),
+        "bench carved chunks"
+    );
+    for (stage, secs) in crate::world::prof::report() {
+        info!(
+            stage,
+            cpu_secs = format!("{secs:.2}"),
+            ms_per_chunk = format!(
+                "{:.2}",
+                secs * 1000.0 / g.world.generated_count.max(1) as f64
+            ),
+            "bench stage"
+        );
     }
     Ok(())
 }

@@ -28,6 +28,7 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 winit.workspace = true
+arboard.workspace = true
 clap.workspace = true
 directories.workspace = true
 rc_render.workspace = true

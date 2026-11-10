@@ -547,7 +547,7 @@ fn hand(gfx: &mut Gfx, g: &Game, cam: &Cam, pf: f32, day: f32, scratch: &mut Vec
     );
     // Swing progress 0..1 (6-tick animation like vanilla).
     let sw = if g.swing > 0 {
-        1.0 - (g.swing as f32 - pf).max(0.0) / 6.0
+        1.0 - (g.swing as f32 - pf).max(0.0) / crate::game::SWING_TICKS as f32
     } else {
         0.0
     };

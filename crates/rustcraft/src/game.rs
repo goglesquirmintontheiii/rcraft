@@ -14,6 +14,11 @@ use crate::particles::Particles;
 use crate::player::{GameMode, Hit, MoveInput, Player, outline_boxes};
 use crate::world::World;
 
+/// Length of the arm swing animation in ticks.
+pub const SWING_TICKS: u32 = 6;
+/// Ticks between blocks broken while holding attack in creative mode.
+const CREATIVE_BREAK_DELAY: u32 = 5;
+
 /// Input sampled for one tick.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TickInput {
@@ -878,7 +883,7 @@ impl Game {
         if input.attack_pressed
             && let Some(i) = self.target_entity
         {
-            self.swing = 6;
+            self.swing_arm(true);
             if self.attack_cooldown == 0 {
                 self.attack_cooldown = 10;
                 let dmg = 1.0
@@ -927,16 +932,20 @@ impl Game {
         // Breaking.
         match (input.attack, self.target) {
             (true, Some(hit)) => {
-                self.swing = 6;
+                // Holding the button loops the swing instead of restarting it
+                // every tick (that restart was the hand "twitch", issue #2).
+                self.swing_arm(input.attack_pressed);
                 let s = self.world.get_block(hit.pos);
                 if self.player.mode == GameMode::Creative {
                     let sword = self
                         .inv
                         .held()
                         .is_some_and(|st| items().name(st.item).ends_with("_sword"));
-                    if self.break_cooldown == 0 && !sword {
+                    // Like vanilla: every click breaks at once; holding the
+                    // button repeats every 5 ticks, so fast clicking is quicker.
+                    if !sword && (input.attack_pressed || self.break_cooldown == 0) {
                         self.break_block(hit.pos, false);
-                        self.break_cooldown = 6;
+                        self.break_cooldown = CREATIVE_BREAK_DELAY;
                     }
                     self.breaking = None;
                 } else if let Some(ticks) = items::break_ticks(
@@ -1004,6 +1013,15 @@ impl Game {
             [0.55, 0.75, 0.35]
         } else {
             [1.0; 3]
+        }
+    }
+
+    /// Start the arm swing. A new press may restart a swing that is at least
+    /// half done; a held button only starts the next one when it finishes,
+    /// so the hand moves smoothly instead of jittering.
+    pub fn swing_arm(&mut self, fresh_press: bool) {
+        if self.swing == 0 || (fresh_press && self.swing <= SWING_TICKS / 2) {
+            self.swing = SWING_TICKS;
         }
     }
 
@@ -1393,7 +1411,7 @@ impl Game {
                 1.0,
                 rc_audio::Category::Blocks,
             );
-            self.swing = 6;
+            self.swing_arm(true);
             return true;
         }
         match n {
@@ -1490,7 +1508,7 @@ impl Game {
             if !creative {
                 self.inv.consume_held();
             }
-            self.swing = 6;
+            self.swing_arm(true);
             return;
         }
         if m.kind == MobKind::Sheep && held_name == "shears" && !m.sheared && !m.baby {
@@ -1522,7 +1540,7 @@ impl Game {
                     rc_audio::Category::Players,
                 );
             }
-            self.swing = 6;
+            self.swing_arm(true);
             return;
         }
         if let Some(d) = held_name.strip_suffix("_dye")
@@ -1556,7 +1574,7 @@ impl Game {
                 1.0,
                 rc_audio::Category::Players,
             );
-            self.swing = 6;
+            self.swing_arm(true);
         }
     }
 
@@ -1737,7 +1755,7 @@ impl Game {
                         1.0,
                         rc_audio::Category::Blocks,
                     );
-                    self.swing = 6;
+                    self.swing_arm(true);
                 }
                 return;
             }
@@ -1761,7 +1779,7 @@ impl Game {
                     if !creative {
                         self.inv.damage_held(1);
                     }
-                    self.swing = 6;
+                    self.swing_arm(true);
                 }
                 return;
             }
@@ -1778,7 +1796,7 @@ impl Game {
                     if !creative {
                         self.inv.damage_held(1);
                     }
-                    self.swing = 6;
+                    self.swing_arm(true);
                 }
                 return;
             }
@@ -1803,7 +1821,7 @@ impl Game {
                         if !creative {
                             self.inv.damage_held(1);
                         }
-                        self.swing = 6;
+                        self.swing_arm(true);
                     }
                 }
                 return;
@@ -1846,7 +1864,7 @@ impl Game {
                 if !creative {
                     self.inv.consume_held();
                 }
-                self.swing = 6;
+                self.swing_arm(true);
             }
             return;
         }
@@ -1882,7 +1900,7 @@ impl Game {
             if self.player.mode != GameMode::Creative {
                 self.inv.consume_held();
             }
-            self.swing = 6;
+            self.swing_arm(true);
             return;
         }
         let p = if replaceable(clicked)
@@ -2015,7 +2033,7 @@ impl Game {
             self.world.set_block(p, ns);
         }
         self.block_sound(state, "place", p, 1.0, 0.8);
-        self.swing = 6;
+        self.swing_arm(true);
         if self.player.mode == GameMode::Survival {
             self.inv.consume_held();
         }

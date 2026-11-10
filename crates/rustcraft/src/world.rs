@@ -58,6 +58,39 @@ enum IoMsg {
     Stop,
 }
 
+/// Cumulative CPU time per pipeline stage (nanoseconds), for `--scene bench`
+/// and F3. Relaxed atomics: negligible cost.
+pub mod prof {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static CARVE: AtomicU64 = AtomicU64::new(0);
+    pub static DECORATE: AtomicU64 = AtomicU64::new(0);
+    pub static EXPORT: AtomicU64 = AtomicU64::new(0);
+    pub static LIGHT: AtomicU64 = AtomicU64::new(0);
+    pub static MESH: AtomicU64 = AtomicU64::new(0);
+    pub static LOAD: AtomicU64 = AtomicU64::new(0);
+    pub static CARVED: AtomicU64 = AtomicU64::new(0);
+
+    pub fn time<T>(c: &AtomicU64, f: impl FnOnce() -> T) -> T {
+        let t = std::time::Instant::now();
+        let r = f();
+        c.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        r
+    }
+
+    /// (stage, seconds) so far.
+    pub fn report() -> [(&'static str, f64); 6] {
+        let g = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e9;
+        [
+            ("carve", g(&CARVE)),
+            ("decorate", g(&DECORATE)),
+            ("export", g(&EXPORT)),
+            ("light", g(&LIGHT)),
+            ("mesh", g(&MESH)),
+            ("load", g(&LOAD)),
+        ]
+    }
+}
+
 /// Convert a finished worldgen chunk into a runtime chunk column.
 #[must_use]
 pub fn export_chunk(p: &ProtoChunk) -> Chunk {
@@ -96,6 +129,18 @@ pub fn export_chunk(p: &ProtoChunk) -> Chunk {
     c
 }
 
+/// World generation, pipelined (issue #2):
+///
+/// - carving (noise, surface, carvers: ~95 % of the cost, independent per
+///   chunk) streams continuously on the worker pool, nearest targets first,
+///   with a bounded number in flight so lighting and meshing still get
+///   workers;
+/// - this thread decorates chunks as soon as their 3×3 neighbourhood is
+///   carved (decoration writes into neighbours, so it stays sequential), and
+///   hands finished targets back.
+///
+/// Before 0.2.1 one target was carved and decorated at a time, which left
+/// most workers idle (~20 chunks/s).
 fn gen_thread(
     dg: Arc<DimensionGen>,
     pool: Arc<rayon::ThreadPool>,
@@ -106,90 +151,143 @@ fn gen_thread(
     let mut store = ChunkStore::new(&dg);
     let mut wanted: AHashSet<ChunkPos> = AHashSet::new();
     let mut finalized: AHashSet<ChunkPos> = AHashSet::new();
+    // Targets whose carving has been requested, in request order.
+    let mut active: Vec<ChunkPos> = Vec::new();
+    let mut carving: AHashSet<ChunkPos> = AHashSet::new();
+    let (carved_tx, carved_rx) = unbounded::<ProtoChunk>();
+    let max_carving = pool.current_num_threads() * 2 + 2;
+    let max_active = pool.current_num_threads() * 4 + 8;
     let mut since_evict = 0u32;
+    let mut stop = false;
+    let handle = |m: GenMsg,
+                  wanted: &mut AHashSet<ChunkPos>,
+                  active: &mut Vec<ChunkPos>,
+                  stop: &mut bool| match m {
+        GenMsg::Want(p) => {
+            wanted.insert(p);
+        }
+        GenMsg::Cancel(p) => {
+            wanted.remove(&p);
+            active.retain(|a| *a != p);
+        }
+        GenMsg::Stop => *stop = true,
+    };
     loop {
-        // Drain messages; block only when idle.
-        let msg = if wanted.is_empty() {
+        // Block only when there is nothing to do.
+        if wanted.is_empty() && active.is_empty() && carving.is_empty() {
             match rx.recv() {
-                Ok(m) => Some(m),
+                Ok(m) => handle(m, &mut wanted, &mut active, &mut stop),
                 Err(_) => return,
             }
-        } else {
-            rx.try_recv().ok()
-        };
-        let mut stop = false;
-        let mut handle = |m: GenMsg, wanted: &mut AHashSet<ChunkPos>| match m {
-            GenMsg::Want(p) => {
-                wanted.insert(p);
+        } else if carving.len() >= max_carving || (wanted.is_empty() && !carving.is_empty()) {
+            // Wait for a carved chunk (or a message).
+            crossbeam_channel::select! {
+                recv(rx) -> m => match m {
+                    Ok(m) => handle(m, &mut wanted, &mut active, &mut stop),
+                    Err(_) => return,
+                },
+                recv(carved_rx) -> c => if let Ok(c) = c {
+                    carving.remove(&c.pos);
+                    store.chunks.entry(c.pos).or_insert(c);
+                },
             }
-            GenMsg::Cancel(p) => {
-                wanted.remove(&p);
-            }
-            GenMsg::Stop => stop = true,
-        };
-        if let Some(m) = msg {
-            handle(m, &mut wanted);
         }
         while let Ok(m) = rx.try_recv() {
-            handle(m, &mut wanted);
+            handle(m, &mut wanted, &mut active, &mut stop);
         }
         if stop {
             return;
         }
+        while let Ok(c) = carved_rx.try_recv() {
+            carving.remove(&c.pos);
+            store.chunks.entry(c.pos).or_insert(c);
+        }
         let (c, rd) = *center.lock();
-        let Some(&target) = wanted
-            .iter()
-            .min_by_key(|p| ((p.x - c.x).pow(2) + (p.z - c.z).pow(2), p.x, p.z))
-        else {
-            continue;
-        };
-        wanted.remove(&target);
-        // Decorate the 3×3 around the target (needs 5×5 carved).
-        let mut need_dec = Vec::new();
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let n = ChunkPos::new(target.x + dx, target.z + dz);
-                if finalized.contains(&n) {
-                    continue;
-                }
-                if store
-                    .chunks
-                    .get(&n)
-                    .is_some_and(|ch| ch.status >= Status::Features)
-                {
-                    continue;
-                }
-                need_dec.push(n);
+        let dist = |p: &ChunkPos| ((p.x - c.x).pow(2) + (p.z - c.z).pow(2), p.x, p.z);
+        // Promote the nearest wanted chunks to active targets.
+        if active.len() < max_active && !wanted.is_empty() {
+            let room = max_active - active.len();
+            let mut next: Vec<ChunkPos> = wanted.iter().copied().collect();
+            if next.len() > room {
+                next.select_nth_unstable_by_key(room, dist);
+                next.truncate(room);
+            }
+            next.sort_unstable_by_key(dist);
+            for p in next {
+                wanted.remove(&p);
+                active.push(p);
             }
         }
-        let mut carve = Vec::new();
-        for n in &need_dec {
+        // Keep the pool fed with carving for the active targets, in order.
+        'feed: for t in &active {
+            for dx in -2..=2 {
+                for dz in -2..=2 {
+                    if carving.len() >= max_carving {
+                        break 'feed;
+                    }
+                    let m = ChunkPos::new(t.x + dx, t.z + dz);
+                    if finalized.contains(&m)
+                        || carving.contains(&m)
+                        || store.chunks.contains_key(&m)
+                    {
+                        continue;
+                    }
+                    carving.insert(m);
+                    let dg = dg.clone();
+                    let ctx = carved_tx.clone();
+                    pool.spawn(move || {
+                        let c = prof::time(&prof::CARVE, || dg.generate_to_carvers(m));
+                        prof::CARVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let _ = ctx.send(c);
+                    });
+                }
+            }
+        }
+        // Finish every active target whose 5×5 is carved.
+        let mut i = 0;
+        while i < active.len() {
+            let t = active[i];
+            let carved = |m: ChunkPos| finalized.contains(&m) || store.chunks.contains_key(&m);
+            let ready =
+                (-2..=2).all(|dx| (-2..=2).all(|dz| carved(ChunkPos::new(t.x + dx, t.z + dz))));
+            if !ready {
+                i += 1;
+                continue;
+            }
+            active.remove(i);
+            let mut need_dec = Vec::new();
             for dx in -1..=1 {
                 for dz in -1..=1 {
-                    let m = ChunkPos::new(n.x + dx, n.z + dz);
-                    if !finalized.contains(&m) && !store.chunks.contains_key(&m) {
-                        carve.push(m);
+                    let n = ChunkPos::new(t.x + dx, t.z + dz);
+                    if finalized.contains(&n)
+                        || store
+                            .chunks
+                            .get(&n)
+                            .is_some_and(|ch| ch.status >= Status::Features)
+                    {
+                        continue;
                     }
+                    need_dec.push(n);
                 }
             }
-        }
-        carve.sort_by_key(|p| (p.x, p.z));
-        carve.dedup();
-        pool.install(|| store.ensure_carved(&carve));
-        need_dec.sort_by_key(|p| (p.x, p.z));
-        for n in need_dec {
-            store.decorate(n);
-        }
-        if let Some(pc) = store.chunks.remove(&target) {
-            let chunk = export_chunk(&pc);
-            finalized.insert(target);
-            if tx.send(Done::Generated(chunk)).is_err() {
-                return;
+            need_dec.sort_by_key(|p| (p.x, p.z));
+            prof::time(&prof::DECORATE, || {
+                for n in need_dec {
+                    store.decorate(n);
+                }
+            });
+            if let Some(pc) = store.chunks.remove(&t) {
+                finalized.insert(t);
+                let tx = tx.clone();
+                pool.spawn(move || {
+                    let c = prof::time(&prof::EXPORT, || export_chunk(&pc));
+                    let _ = tx.send(Done::Generated(c));
+                });
             }
         }
         // Evict far work-in-progress chunks to bound memory.
         since_evict += 1;
-        if since_evict >= 16 {
+        if since_evict >= 64 {
             since_evict = 0;
             let keep = rd + 6;
             let far: Vec<ChunkPos> = store
@@ -284,6 +382,16 @@ pub struct World {
     remesh: AHashMap<ChunkPos, (usize, usize)>,
     in_flight: usize,
     pub max_in_flight: usize,
+    /// Centre and render distance of the last streaming scan; the O(r²)
+    /// scans only rerun when either changes.
+    last_scan: Option<(ChunkPos, i32)>,
+    /// Loaded chunks that may still need lighting or (re)meshing. Only these
+    /// are considered each frame, instead of every loaded chunk.
+    todo: AHashSet<ChunkPos>,
+    /// Chunks to load from disk (or generate), farthest first so `pop`
+    /// yields the nearest. Fed to the pool a few at a time.
+    load_queue: Vec<ChunkPos>,
+    loads_in_flight: usize,
     last_autosave: Instant,
     pub generated_count: u64,
     shutdown: Arc<AtomicBool>,
@@ -462,6 +570,10 @@ impl World {
             remesh: AHashMap::new(),
             in_flight: 0,
             max_in_flight: threads.max(1) * 3,
+            last_scan: None,
+            todo: AHashSet::new(),
+            load_queue: Vec::new(),
+            loads_in_flight: 0,
             last_autosave: Instant::now(),
             generated_count: 0,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -597,6 +709,7 @@ impl World {
         if let Some(c) = self.chunks.get_mut(&p) {
             Arc::make_mut(c).light_valid = false;
         }
+        self.todo.insert(p);
     }
 
     fn queue_remesh(&mut self, p: ChunkPos, lo: usize, hi: usize) {
@@ -606,6 +719,7 @@ impl World {
         let e = self.remesh.entry(p).or_insert((lo, hi));
         e.0 = e.0.min(lo);
         e.1 = e.1.max(hi);
+        self.todo.insert(p);
     }
 
     // ---- streaming ----
@@ -634,46 +748,45 @@ impl World {
         })
     }
 
-    /// Stream chunks around `player` and apply finished work. Spends at most
-    /// `budget` on the main thread.
-    pub fn update(&mut self, player: [f64; 3], render_distance: i32, budget: Duration) {
-        let start = Instant::now();
-        let pc = ChunkPos::new(
-            (player[0].floor() as i32) >> 4,
-            (player[2].floor() as i32) >> 4,
-        );
-        *self.center.lock() = (pc, render_distance);
-        // Meshing a chunk needs lit neighbours, and lighting needs theirs.
-        let load_r = render_distance + 2;
-        // Request missing chunks nearest-first.
+    /// Request, unload and cancel chunks for a new centre / render distance.
+    /// Costs O(r²), so it only runs when the player changes chunk.
+    fn scan(
+        &mut self,
+        pc: ChunkPos,
+        render_distance: i32,
+        load_r: i32,
+        unload_r: i32,
+        old: Option<(ChunkPos, i32)>,
+    ) {
+        // Request missing chunks nearest-first; chunks that just came into
+        // view need meshing again.
         let mut want: Vec<ChunkPos> = Vec::new();
+        let was_in_view = |p: ChunkPos| {
+            old.is_some_and(|(oc, orr)| (p.x - oc.x).abs() <= orr && (p.z - oc.z).abs() <= orr)
+        };
         for dx in -load_r..=load_r {
             for dz in -load_r..=load_r {
                 let p = ChunkPos::new(pc.x + dx, pc.z + dz);
-                if !self.chunks.contains_key(&p) && !self.requested.contains(&p) {
+                if self.chunks.contains_key(&p) {
+                    if dx.abs() <= render_distance && dz.abs() <= render_distance && !was_in_view(p)
+                    {
+                        self.todo.insert(p);
+                    }
+                } else if !self.requested.contains(&p) {
                     want.push(p);
                 }
             }
         }
-        want.sort_by_key(|p| (p.x - pc.x).pow(2) + (p.z - pc.z).pow(2));
-        for p in want {
-            self.requested.insert(p);
-            let st = self.storage.clone();
-            let map = self.map.clone();
-            let tx = self.done_tx.clone();
-            self.pool.spawn(move || {
-                let r = match st.load(p, &map) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!("chunk {p:?} unreadable, regenerating: {e:#}");
-                        None
-                    }
-                };
-                let _ = tx.send(Done::Loaded(p, r));
-            });
+        for p in &want {
+            self.requested.insert(*p);
         }
+        self.load_queue
+            .retain(|p| (p.x - pc.x).abs() <= unload_r && (p.z - pc.z).abs() <= unload_r);
+        self.load_queue.extend(want);
+        // Farthest first: `pop` takes the nearest.
+        self.load_queue
+            .sort_unstable_by_key(|p| std::cmp::Reverse((p.x - pc.x).pow(2) + (p.z - pc.z).pow(2)));
         // Unload far chunks.
-        let unload_r = render_distance + 3;
         let far: Vec<ChunkPos> = self
             .chunks
             .keys()
@@ -690,6 +803,7 @@ impl World {
                 }
                 self.state.remove(&p);
                 self.remesh.remove(&p);
+                self.todo.remove(&p);
                 self.unloaded.push(p);
             }
         }
@@ -705,6 +819,56 @@ impl World {
                 let _ = self.gen_tx.send(GenMsg::Cancel(p));
             }
         }
+    }
+
+    /// Start disk loads for the nearest queued chunks, a bounded number at a
+    /// time (spawning one task per wanted chunk at once flooded the pool and
+    /// stalled the frame at large render distances).
+    fn feed_loads(&mut self) {
+        let cap = self.max_in_flight * 2;
+        while self.loads_in_flight < cap {
+            let Some(p) = self.load_queue.pop() else {
+                break;
+            };
+            if !self.requested.contains(&p) {
+                continue;
+            }
+            self.loads_in_flight += 1;
+            let st = self.storage.clone();
+            let map = self.map.clone();
+            let tx = self.done_tx.clone();
+            self.pool.spawn(move || {
+                let r = match prof::time(&prof::LOAD, || st.load(p, &map)) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("chunk {p:?} unreadable, regenerating: {e:#}");
+                        None
+                    }
+                };
+                let _ = tx.send(Done::Loaded(p, r));
+            });
+        }
+    }
+
+    /// Stream chunks around `player` and apply finished work. Spends at most
+    /// `budget` on the main thread.
+    pub fn update(&mut self, player: [f64; 3], render_distance: i32, budget: Duration) {
+        let start = Instant::now();
+        let pc = ChunkPos::new(
+            (player[0].floor() as i32) >> 4,
+            (player[2].floor() as i32) >> 4,
+        );
+        *self.center.lock() = (pc, render_distance);
+        // Meshing a chunk needs lit neighbours, and lighting needs theirs.
+        let load_r = render_distance + 2;
+        let unload_r = render_distance + 3;
+        let scan = Some((pc, render_distance));
+        if self.last_scan != scan {
+            let old = self.last_scan;
+            self.last_scan = scan;
+            self.scan(pc, render_distance, load_r, unload_r, old);
+        }
+        self.feed_loads();
         // Apply results.
         while start.elapsed() < budget {
             let Ok(d) = self.done_rx.try_recv() else {
@@ -712,10 +876,11 @@ impl World {
             };
             self.apply(d, pc, unload_r);
         }
-        // Schedule lighting and meshing, nearest first.
+        // Schedule lighting and meshing, nearest first, over the chunks
+        // that still have work.
         let mut cands: Vec<(i32, ChunkPos)> = self
-            .chunks
-            .keys()
+            .todo
+            .iter()
             .map(|p| ((p.x - pc.x).pow(2) + (p.z - pc.z).pow(2), *p))
             .collect();
         cands.sort_unstable_by_key(|c| (c.0, c.1.x, c.1.z));
@@ -723,17 +888,30 @@ impl World {
             if self.in_flight >= self.max_in_flight {
                 break;
             }
-            let lit = self.chunks[&p].light_valid;
+            let Some(chunk) = self.chunks.get(&p) else {
+                self.todo.remove(&p);
+                continue;
+            };
+            let lit = chunk.light_valid;
             let st = self.state.get(&p).copied().unwrap_or_default();
             if !lit {
-                if !st.light_pending && self.neighbours_present(p) {
+                if st.light_pending {
+                    // The Lit result re-adds it.
+                    self.todo.remove(&p);
+                } else if self.neighbours_present(p) {
                     self.spawn_light(p);
+                    self.todo.remove(&p);
+                } else {
+                    // Re-added when a neighbour arrives.
+                    self.todo.remove(&p);
                 }
                 continue;
             }
             let in_view =
                 (p.x - pc.x).abs() <= render_distance && (p.z - pc.z).abs() <= render_distance;
             if !in_view {
+                // Re-added by the scan when it comes into view.
+                self.todo.remove(&p);
                 continue;
             }
             let needs_full = st.meshed_version == 0 && st.mesh_pending == 0;
@@ -742,11 +920,20 @@ impl World {
             } else {
                 self.remesh.get(&p).copied()
             };
-            if let Some((lo, hi)) = range
-                && self.neighbours_lit(p)
-            {
-                self.remesh.remove(&p);
-                self.spawn_mesh(p, lo, hi);
+            match range {
+                Some((lo, hi)) if self.neighbours_lit(p) => {
+                    self.remesh.remove(&p);
+                    self.spawn_mesh(p, lo, hi);
+                    if !self.remesh.contains_key(&p) {
+                        self.todo.remove(&p);
+                    }
+                }
+                Some(_) => {} // waiting for neighbours' light
+                None => {
+                    if st.meshed_version != 0 {
+                        self.todo.remove(&p);
+                    }
+                }
             }
         }
         if self.last_autosave.elapsed() > Duration::from_secs(60) {
@@ -759,12 +946,14 @@ impl World {
         let far = |p: ChunkPos| (p.x - pc.x).abs() > unload_r || (p.z - pc.z).abs() > unload_r;
         match d {
             Done::Loaded(p, Some(c)) => {
+                self.loads_in_flight = self.loads_in_flight.saturating_sub(1);
                 if far(p) || !self.requested.remove(&p) {
                     return;
                 }
                 self.insert_chunk(c);
             }
             Done::Loaded(p, None) => {
+                self.loads_in_flight = self.loads_in_flight.saturating_sub(1);
                 if far(p) || !self.requested.contains(&p) {
                     self.requested.remove(&p);
                     return;
@@ -792,6 +981,7 @@ impl World {
                     return;
                 };
                 st.light_pending = false;
+                self.todo.insert(p);
                 if st.version != ver {
                     return;
                 }
@@ -808,10 +998,13 @@ impl World {
                 // Neighbours may now be meshable at the borders.
                 for dx in -1..=1 {
                     for dz in -1..=1 {
+                        let n = ChunkPos::new(p.x + dx, p.z + dz);
+                        if self.chunks.contains_key(&n) {
+                            self.todo.insert(n);
+                        }
                         if dx == 0 && dz == 0 {
                             continue;
                         }
-                        let n = ChunkPos::new(p.x + dx, p.z + dz);
                         if self.state.get(&n).is_some_and(|s| s.meshed_version != 0) && !first {
                             self.queue_remesh(n, range.0, range.1);
                         }
@@ -850,6 +1043,7 @@ impl World {
         }
         self.loaded_events.push((p, false));
         self.chunks.insert(p, Arc::new(c));
+        self.todo.insert(p);
         let st = self.state.entry(p).or_default();
         st.version += 1;
         if lit {
@@ -859,6 +1053,9 @@ impl World {
         for dx in -1..=1 {
             for dz in -1..=1 {
                 let n = ChunkPos::new(p.x + dx, p.z + dz);
+                if self.chunks.contains_key(&n) {
+                    self.todo.insert(n);
+                }
                 if (dx != 0 || dz != 0)
                     && let Some(s) = self.state.get(&n)
                     && s.meshed_version != 0
@@ -883,7 +1080,7 @@ impl World {
         self.in_flight += 1;
         self.pool.spawn(move || {
             let refs: [Option<&Chunk>; 9] = std::array::from_fn(|i| n[i].as_deref());
-            let l = light::compute(&refs);
+            let l = prof::time(&prof::LIGHT, || light::compute(&refs));
             let _ = tx.send(Done::Lit(p, ver, l, range));
         });
     }
@@ -908,14 +1105,16 @@ impl World {
             let shared = self.mesh.clone();
             let tx = self.done_tx.clone();
             self.pool.spawn(move || {
-                let snap = Snapshot::capture(&n, sy);
-                let m = mesh_section(
-                    &snap,
-                    &shared.tables,
-                    &shared.models,
-                    &shared.colors,
-                    shared.smooth,
-                );
+                let m = prof::time(&prof::MESH, || {
+                    let snap = Snapshot::capture(&n, sy);
+                    mesh_section(
+                        &snap,
+                        &shared.tables,
+                        &shared.models,
+                        &shared.colors,
+                        shared.smooth,
+                    )
+                });
                 let _ = tx.send(Done::Meshed(p, sy, ver, m));
             });
         }

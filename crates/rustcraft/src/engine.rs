@@ -85,6 +85,9 @@ pub struct Engine {
     /// Render-distance cap from measured process memory (see `memory_guard`).
     mem_rd_cap: i32,
     mem_check: Instant,
+    /// Process memory before the world opened (driver, assets, …): the part
+    /// the render distance cannot reduce.
+    base_mem_mb: f32,
 }
 
 impl std::fmt::Debug for Engine {
@@ -141,6 +144,7 @@ impl Engine {
             music_cooldown: 600,
             mem_rd_cap: crate::options::MAX_RENDER_DISTANCE,
             mem_check: Instant::now(),
+            base_mem_mb: 0.0,
             ambient_cooldown: 0,
             opts,
             game_dir,
@@ -185,25 +189,33 @@ impl Engine {
             .max(2)
     }
 
-    /// Enforce the memory limit against real usage: step the view distance
-    /// down while over the limit, back up slowly once well under it.
+    /// Enforce the memory limit against real usage. Loaded chunks cost
+    /// roughly (2r+7)² × per-chunk, so when over the limit the view distance
+    /// is scaled by the square root of how far over the chunk part is,
+    /// instead of one step every two seconds (issue #2).
     fn memory_guard(&mut self) {
-        if self.mem_check.elapsed() < Duration::from_secs(2) || self.game.is_none() {
+        if Instant::now() < self.mem_check + Duration::from_secs(1) || self.game.is_none() {
             return;
         }
         self.mem_check = Instant::now();
-        let used = self.stats.mem_mb;
+        let used = crate::sysinfo::process_memory_mb();
         let limit = self.opts.max_memory_mb as f32;
         let cur = self.render_distance();
-        if used > limit * 1.05 && cur > 2 {
-            self.mem_rd_cap = cur - 1;
+        let base = self.base_mem_mb.max(1.0);
+        if used > limit * 1.03 && cur > 2 {
+            let chunk_used = (used - base).max(1.0);
+            let chunk_budget = (limit - base).max(0.0) * 0.9;
+            let side = (2 * cur + 7) as f32 * (chunk_budget / chunk_used).sqrt();
+            let rd = (((side - 7.0) / 2.0).floor() as i32).clamp(2, cur - 1);
+            self.mem_rd_cap = rd;
+            // Let the unloads land (and the allocator settle) before
+            // measuring again, so one overshoot is not counted twice.
+            self.mem_check = Instant::now() + Duration::from_secs(6);
             warn!(
                 used,
-                limit,
-                rd = self.mem_rd_cap,
-                "over the memory limit; reducing render distance"
+                limit, base, rd, "over the memory limit; reducing render distance"
             );
-        } else if used < limit * 0.75 && self.mem_rd_cap < self.opts.effective_render_distance() {
+        } else if used < limit * 0.8 && self.mem_rd_cap < self.opts.effective_render_distance() {
             self.mem_rd_cap += 1;
         }
     }
@@ -294,6 +306,8 @@ impl Engine {
 
     /// Open the world in `saves/<dir>`, or create it from `create`.
     pub fn open_world(&mut self, dir: Option<&str>, create: Option<NewWorld>) -> Result<()> {
+        self.base_mem_mb = crate::sysinfo::process_memory_mb();
+        self.mem_rd_cap = crate::options::MAX_RENDER_DISTANCE;
         let dir_name = match (&create, dir) {
             (Some(c), _) => crate::worlds::new_dir_name(&self.game_dir, &c.name),
             (None, Some(d)) => d.to_owned(),
@@ -505,6 +519,9 @@ impl Engine {
         self.memory_guard();
         self.time += (dt * 20.0) as f32;
         self.simulate(dt);
+        let t_sim = t0.elapsed();
+        let mut t_stream = Duration::ZERO;
+        let mut t_upload = Duration::ZERO;
         // Stream chunks and upload finished meshes.
         let rd = self.render_distance();
         if let Some(g) = self.game.as_mut() {
@@ -516,10 +533,12 @@ impl Engine {
             } else {
                 Duration::from_millis(3)
             };
+            let ts = Instant::now();
             g.stream(rd, budget);
             for p in g.world.unloaded.drain(..) {
                 self.gfx.terrain.remove_chunk(p.x, p.z);
             }
+            t_stream = ts.elapsed();
             let upload_start = Instant::now();
             let mut n = 0;
             while let Some((origin, mesh)) = g.world.mesh_out.pop() {
@@ -529,6 +548,7 @@ impl Engine {
                     break;
                 }
             }
+            t_upload = upload_start.elapsed();
             // A block GUI opened this tick.
             if g.container.is_some() && self.screens.is_empty() {
                 self.screens.push(Screen::Inventory);
@@ -701,6 +721,15 @@ impl Engine {
         queue.submit([encoder.finish()]);
         // Stats.
         let ft = t0.elapsed().as_secs_f32() * 1000.0;
+        if ft > 50.0 {
+            warn!(
+                frame_ms = ft,
+                simulate_ms = t_sim.as_secs_f32() * 1000.0,
+                stream_ms = t_stream.as_secs_f32() * 1000.0,
+                upload_ms = t_upload.as_secs_f32() * 1000.0,
+                "long frame"
+            );
+        }
         self.frame_times.push(dt as f32);
         if self.frame_times.len() > 30 {
             self.frame_times.remove(0);
@@ -967,7 +996,16 @@ impl Engine {
                     && g.player.mode != GameMode::Spectator
                 {
                     g.drop_held(whole);
-                    g.swing = 6;
+                    g.swing_arm(true);
+                }
+            }
+            GameKey::SwapHands => {
+                if top.is_none()
+                    && let Some(g) = self.game.as_mut()
+                    && g.player.mode != GameMode::Spectator
+                {
+                    let sel = g.inv.selected;
+                    g.inv.slots.swap(sel, crate::items::OFFHAND_SLOT);
                 }
             }
         }
@@ -984,6 +1022,8 @@ pub enum GameKey {
     F1,
     /// Q (true with Ctrl: whole stack).
     Drop(bool),
+    /// F: swap the held item with the offhand.
+    SwapHands,
 }
 
 fn install_update(st: &Arc<Mutex<rc_update::Status>>, m: &rc_update::Manifest) {

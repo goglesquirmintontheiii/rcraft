@@ -25,7 +25,7 @@ const DATA_VERSION: i32 = 3955;
 #[must_use]
 pub fn find_java_worlds() -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
-    for mc in rc_assets::source::minecraft_dirs() {
+    for mc in rc_assets::source::game_dirs() {
         let Ok(rd) = std::fs::read_dir(mc.join("saves")) else {
             continue;
         };

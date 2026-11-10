@@ -64,6 +64,7 @@ crossbeam-channel = "0.5"
 rayon = "1"
 wgpu = "30"
 winit = "0.30"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 pollster = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 zstd = "0.14"

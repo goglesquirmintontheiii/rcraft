@@ -35,6 +35,13 @@ struct App {
     grabbed: bool,
     screenshot_requested: bool,
     next_frame: Instant,
+    /// `startup.lock`, removed once the first frame is shown.
+    startup_marker: Option<PathBuf>,
+}
+
+/// Text on the system clipboard, if any.
+fn clipboard_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
 fn build_gfx(
@@ -45,6 +52,7 @@ fn build_gfx(
     let path = assets_override
         .map(std::path::Path::to_path_buf)
         .or_else(|| opts.assets_path.as_ref().map(PathBuf::from));
+    opts.apply_minecraft_dir();
     let assets = rc_assets::Assets::discover(path.as_deref());
     Gfx::new(&gpu.device, &gpu.queue, gpu.color_format(), assets, opts)
 }
@@ -136,6 +144,9 @@ impl App {
             }
         }
         gpu.queue.present(frame);
+        if let Some(m) = self.startup_marker.take() {
+            let _ = std::fs::remove_file(m);
+        }
         let rebuild = engine.handle(actions);
         if rebuild {
             match build_gfx(gpu, &engine.opts, self.launch.assets.as_deref()) {
@@ -181,10 +192,20 @@ impl App {
                 crate::screens::Screen::Chat { .. }
                     | crate::screens::Screen::CreateWorld { .. }
                     | crate::screens::Screen::Creative { .. }
+                    | crate::screens::Screen::EditWorld { .. }
+                    | crate::screens::Screen::ImportWorld { .. }
+                    | crate::screens::Screen::MinecraftDir { .. }
             )
         );
         if pressed {
-            if let Some(t) = text {
+            if e.input.ctrl && code == KeyCode::KeyV {
+                // Paste into the focused text field.
+                if let Some(t) = clipboard_text() {
+                    e.input.typed.push_str(t.lines().next().unwrap_or_default());
+                }
+            } else if let Some(t) = text
+                && !e.input.ctrl
+            {
                 e.input.typed.push_str(t);
             }
             let uk = match code {
@@ -250,6 +271,7 @@ impl App {
             KeyCode::KeyT => e.game_key(GameKey::Chat(false)),
             KeyCode::Slash => e.game_key(GameKey::Chat(true)),
             KeyCode::KeyQ => e.game_key(GameKey::Drop(e.input.ctrl)),
+            KeyCode::KeyF => e.game_key(GameKey::SwapHands),
             KeyCode::Digit1 => e.game_key(GameKey::Hotbar(0)),
             KeyCode::Digit2 => e.game_key(GameKey::Hotbar(1)),
             KeyCode::Digit3 => e.game_key(GameKey::Hotbar(2)),
@@ -279,7 +301,24 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let opts = Options::load(&self.launch.game_dir.join("options.json"));
+        // Safe mode: the marker is removed after the first frame. If it is
+        // still there, the last launch died during startup, so the options
+        // are set aside and defaults used (issue #2: a bad option made every
+        // later launch crash until the data folder was deleted).
+        let dir = &self.launch.game_dir;
+        let marker = dir.join("startup.lock");
+        let mut recovered = false;
+        if marker.exists() {
+            let opts_file = dir.join("options.json");
+            if opts_file.exists() {
+                let _ = std::fs::rename(&opts_file, dir.join("options.crashed.json"));
+                recovered = true;
+            }
+            warn!("the previous launch did not finish starting; using default options");
+        }
+        let _ = std::fs::write(&marker, b"starting\n");
+        self.startup_marker = Some(marker);
+        let opts = Options::load(&dir.join("options.json"));
         let attrs = Window::default_attributes()
             .with_title(format!("RustCraft {}", rc_core::version::VERSION))
             .with_inner_size(winit::dpi::LogicalSize::new(
@@ -317,13 +356,22 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        let engine = Engine::new(
+        let mut engine = Engine::new(
             opts,
             self.launch.game_dir.clone(),
             gfx,
             info.name.clone(),
             format!("{:?} {}", info.backend, info.driver_info),
         );
+        if recovered {
+            engine.screens.push(crate::screens::Screen::Message {
+                title: "RustCraft recovered from a crash".into(),
+                text: "The last launch crashed while starting, so your options were reset. \
+                       The old file was kept as options.crashed.json and the crash report \
+                       is in the crash-reports folder."
+                    .into(),
+            });
+        }
         if self.launch.check_updates && engine.opts.update_policy != rc_update::UpdatePolicy::Off {
             engine.check_updates(false);
         }
@@ -455,6 +503,7 @@ pub fn run(launch: LaunchOptions) -> Result<()> {
         grabbed: false,
         screenshot_requested: false,
         next_frame: Instant::now(),
+        startup_marker: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
